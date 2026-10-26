@@ -1,1 +1,121 @@
-# qaunta3
+# Quanta Altair Controller - firmware (PlatformIO)
+
+## Build and flash
+1. Install VS Code and the **PlatformIO IDE** extension.
+2. File > Open Folder > this folder (the one with `platformio.ini`).
+3. Plug in the ESP32 board and click the **Upload** arrow in the blue bar at the bottom.
+   (If upload doesn't start, hold the board's BOOT button until it begins.)
+4. Serial monitor (plug icon): you should see
+   `Quanta Controller 2.0.0 ... outputs=PWM (bench prototype)` on a bare dev board.
+
+The first build downloads the ESP32 tools and takes a few minutes.
+
+## Layout
+```
+platformio.ini
+src/
+  main.cpp                 the program: boot order, outputs, clock, settings, Wi-Fi, web API, updates
+lib/
+  QuantaCore/src/core.h    schedule, presets, groups, modes, validation (no hardware code)
+  QuantaHal/src/hal.h      drivers: MCP4728 DAC, ADS7828 ADC, DS3231 clock
+  QuantaHal/src/config.h   pins and timings (bench-prototype PWM pins are here)
+  QuantaWebUI/src/web_ui.h the phone page, GENERATED on every build - don't edit
+ui/
+  index.html               the phone page source - edit this one
+tools/
+  embed_ui.py              turns ui/index.html into web_ui.h: run `python tools/embed_ui.py` after editing the page
+                           (or enable extra_scripts in platformio.ini to run it on every build)
+host_tests/
+  test_core.cpp            PC tests for QuantaCore
+```
+Run the PC tests: `g++ -std=c++17 -Ilib/QuantaCore/src host_tests/test_core.cpp -o t && ./t`
+
+## P-0.0.4 (Oct 22): checked screen by screen against the Oct 22 mockup; an output edit never needs more than the controller's 8 schedules
+
+## P-0.0.3 (Oct 22): Expert opens a full Every channel screen on Now (on/off times, curve Edit, limit, calibration per channel)
+
+## P-0.0.2 (Oct 22): Luca's mockup on the controller
+- Several aquariums share the four outputs (up to 4). Each run of the setup assistant is one aquarium with its own
+  tank type, spectrum, times, intensities, acclimation and picture modes. Saved in the settings as `aqs`; the page's
+  `setup`/`tank`/`intensity`... fields are the aquarium it's on (`sel`).
+- Acclimation starts 25 % below the final intensity (final x 0.75).
+- Atlas starts at 25 / 40 / 55 % (Softies & LPS / Mixed / SPS). Atlas & Helix has its own Meso Blue slider.
+- Now page: aquarium pills, More = All / OUT 1-4, per-output Edit (own times and intensity). Expert only from Settings.
+- Picture modes Coral Glow, True Color, Vibrant Fish per aquarium; manual/picture levels of `null` keep the schedule.
+- Quanta Cloud / claim code, chip address search and the gzip page from P-0.0.1 are kept. Settings saved by
+  P-0.0.1 (setup in "uiExtra") are moved into the settings on first boot.
+- Page source: ui/index.html (`python3 tools/embed_ui.py` makes web_ui.h). quanta-local-dashboard.html is the same
+  page as one full HTML file, for tools/make_web_ui.py if you use that.
+
+## Guided setup (2.5.0)
+The setup assistant follows Luca's "Guided Set Up Mode". Its answers are saved in the config as `setup`
+and the controller rebuilds the outputs and curves from them (`applyGuided` in core.h; the page does the same).
+
+| Setup | OUT 1 | OUT 2 | OUT 3 |
+|---|---|---|---|
+| Altair Only, Uniform Intensity (1-6 lights) | all Altairs | - | - |
+| Altair Only, Uniform PAR (3-6 lights) | outside Altairs | inside Altairs | - |
+| Helix AIO | Meso Blue | Reef Crest Daylight | Tropic Sun |
+| Helix Supplemental | the Helix bars (Lagoon Reef blue or white channel) | - | - |
+| Atlas & Helix, Uniform Intensity | Atlas (white) | Meso Blue (blue) | - |
+| Atlas & Helix, Uniform PAR | outside Atlas | inside Atlas | Meso Blue |
+
+Uniform PAR groups: Outside Blue, Outside White, Inside Blue, Inside White. Inside lights start 15 points
+lower (Mixed Reef: outside 65 %, inside 50 %). Default split: 3 lights = 2 outside + 1 inside, 4 = 2 + 2,
+5 = 2 + 3, 6 = 4 + 2. The user can change the split in the assistant.
+Custom Set Up / 3rd Party Equipment switches to Expert mode. Settings saved by older firmware are read
+as Altair Only, using whatever Altairs were on the outputs.
+
+## Bench prototype pins (no controller board)
+When the DAC chips aren't found, outputs go to PWM-to-0-10 V modules:
+
+| Output | Blue (tip) | White (ring) |
+|---|---|---|
+| OUT 1 | GPIO 13 | GPIO 14 |
+| OUT 2 | GPIO 18 | GPIO 19 |
+| OUT 3 | GPIO 23 | GPIO 25 |
+| OUT 4 | GPIO 32 | GPIO 33 |
+
+I2C (controller board / DS3231 clock): SDA 21, SCL 22. The BOOT button works as the setup button:
+hold 5 s = setup hotspot, 20 s = forget Wi-Fi.
+
+## First run
+1. Power the controller. On a phone, join the open Wi-Fi **Quanta-XXXX** (no password).
+2. The Wi-Fi setup page opens by itself (or go to `192.168.4.1`). Pick your home network, enter the password, tap **Save and connect**.
+3. Stay on the page. When it says **Connected**, write down the address it shows: `http://192.168.x.x` or `http://quanta.local`.
+4. The hotspot turns off about 2 minutes later. Switch the phone back to home Wi-Fi and open that address.
+
+Tap **Skip** on the setup page to use the controller from its hotspot without home Wi-Fi.
+Change networks later from Settings > Wi-Fi > **Choose from nearby networks**. Hold BOOT 5 s to reopen the hotspot.
+
+Note: every controller answers to `quanta.local`. With several controllers on one network, use each one's IP address.
+
+## Fleet updates (OTA)
+Every controller installs the same firmware from one `quanta/` folder on your server
+(the same way the reef doser uses `devices/`, but shared):
+
+```
+https://<your server>/quanta/firmware.json   manifest
+https://<your server>/quanta/firmware.bin    firmware
+```
+
+A controller installs an update only if:
+- the manifest says `"product": "quanta-altair"`
+- the firmware link is inside the `quanta/` folder
+- the version is higher than the one it's running
+- the MD5 checksum matches
+
+If the new version doesn't run cleanly for a minute, it rolls back by itself.
+
+**To release an update:**
+1. Raise `FW_VERSION` in `src/main.cpp` (e.g. 2.1.0 → 2.1.1).
+2. Build in PlatformIO.
+3. Run `python tools/make_release.py "Short note about what changed"`.
+4. Upload `release/quanta/firmware.bin` and `release/quanta/firmware.json` to the server's `quanta/` folder.
+
+**On each controller:** set the update server once in Settings → Firmware (or put it in
+`OTA_DEFAULT_URL` in `lib/QuantaHal/src/config.h` before building). Controllers check every 6 hours
+while on home Wi-Fi, 2 minutes after joining, and whenever someone taps **Check for update**.
+
+Firebase Storage links (`.../o/quanta%2Ffirmware.json?alt=media...`) work too. Paste the full
+manifest link and use a full link for `"firmware"` in the manifest.
