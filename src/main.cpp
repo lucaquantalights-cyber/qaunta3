@@ -682,7 +682,7 @@ static void ntpTick() {
 //   3. TEST BUILDS ONLY: watches  devices/<id>/commands/testReset  and, when the cloud asks, wipes its
 //      setup (Wi-Fi kept), confirms back, and restarts. Same handshake as the AIDoser.
 // It runs in its own task on the other core, so slow internet never delays the lights or the web page.
-// The lights never depend on any of this.
+// The lights never depend on any of this.  won't commit
 #ifndef QUANTA_FB_DB_URL
 #define QUANTA_FB_DB_URL "https://quanta-f9c4c-default-rtdb.firebaseio.com"
 #endif
