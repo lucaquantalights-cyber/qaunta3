@@ -6,3 +6,7 @@
 
 # Local Firebase service account credentials
 /secrets/quanta-firebase-service-account.json
+
+/secrets/device_credentials/quantacontroller1.json
+
+/secrets/device_credentials/quantacontroller1.json
