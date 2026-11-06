@@ -686,7 +686,7 @@ static void ntpTick() {
 #ifndef QUANTA_FB_DB_URL
 #define QUANTA_FB_DB_URL "https://quanta-f9c4c-default-rtdb.firebaseio.com"
 #endif
-#ifndef QUANTA_FB_API_KEY                       // Firebase "Web API key" (Project settings > General). Not a secret.
+#ifndef QUANTA_FB_API_KEY                       // Firebase "Web API key" (Project settings > General). .
 #define QUANTA_FB_API_KEY ""
 #endif
 #define CLOUD_STATE_EVERY_MS 60000UL
