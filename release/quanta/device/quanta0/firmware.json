@@ -1,10 +1,10 @@
 {
   "product": "quanta-altair",
   "deviceId": "quanta0",
-  "version": "P-0.0.16",
+  "version": "P-0.1.0",
   "firmware": "firmware.bin",
-  "md5": "5abffd58d3ed2a81bdbcf7ea454b8585",
-  "size": 1191568,
-  "notes": "fixed hotspot",
-  "builtAt": "2026-11-05T23:35:57-06:00"
+  "md5": "1ff3ce3cffae76b6b9085d88b17d6d73",
+  "size": 1197184,
+  "notes": "online",
+  "builtAt": "2026-11-06T13:33:13-06:00"
 }

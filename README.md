@@ -30,6 +30,26 @@ host_tests/
 ```
 Run the PC tests: `g++ -std=c++17 -Ilib/QuantaCore/src host_tests/test_core.cpp -o t && ./t`
 
+## P-0.0.17 (Nov 6): open pages follow saves made elsewhere
+- /api/state carries cfgGen (goes up on every save). The local page and the remote page reload the settings by
+  themselves when it changes, unless you're in the middle of editing (then a message says so).
+
+## P-0.0.16 (Nov 6): control from anywhere (Quanta Cloud remote)
+- The website's remote page (remote.html) is the controller's own page with Now and Schedule, working through the
+  Realtime Database: Schedule / Manual / Picture, sliders, picture settings, lights-on/off, intensity, acclimation,
+  and Expert curves. Commands run through the same handlers as the local page (POST /api/control, /api/config).
+- Database paths: devices/<id>/live, config, commands/{watch, remote, ack}. Live state is sent every 3 s only while
+  someone has the remote page open; commands are checked every 2 s then (every 10 s otherwise).
+- tools/build_remote.py makes remote.html from ui/index.html + ui/remote_adapter.js; build_device.py runs it and
+  puts remote.html in the Firebase public folder.
+
+## P-0.0.15 (Nov 5): hotspot stays up when the saved Wi-Fi can't be reached
+- With the hotspot on and home Wi-Fi not connected, the controller stops hunting for the saved network
+  (that hunt hopped the radio's channel and kept dropping phones). It retries every 3 minutes, only when
+  no phone is on the hotspot. A network just entered on the Wi-Fi page gets the full 45 s to connect.
+- A phone on the hotspot now gets the Wi-Fi setup page whenever home Wi-Fi isn't working, not only on a
+  brand-new controller ("Skip, use without home Wi-Fi" still opens the controller page).
+
 ## P-0.0.14 (Nov 3): Expert changes merged with unique hostnames and per-device updates
 - Unique hostnames re-applied (apply_quanta_unique_hostname.py): quanta3 answers at http://quanta3.local.
 - Per-device OTA rebuilt: a provisioned controller checks https://quantalights.web.app/quanta/device/<id>/ only,

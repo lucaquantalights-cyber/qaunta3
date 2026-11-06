@@ -41,7 +41,7 @@
 
 using namespace qc;
 
-#define FW_VERSION "P-0.0.16"
+#define FW_VERSION "P-0.0.20"
 
 // ======================================================================= state
 static Config   cfg;
@@ -671,7 +671,15 @@ static void ntpTick() {
 // ======================================================================= Quanta Cloud (Firebase over HTTPS)
 // The controller signs in to Firebase as its own "device" login and
 //   1. writes its status to  devices/<id>/state  every minute (the website's "online" check reads this),
-//   2. TEST BUILDS ONLY: watches  devices/<id>/commands/testReset  and, when the cloud asks, wipes its
+//   2. REMOTE CONTROL (P-0.0.16): the Quanta website's remote page (remote.html) works the controller from
+//      anywhere through the database, using the same requests as the local page:
+//        devices/<id>/config          {json, gen}         the saved settings, written when they change
+//        devices/<id>/live            {json, t}           /api/state, every 3 s while someone is watching
+//        devices/<id>/commands/watch  server time          the remote page writes it every 20 s while open
+//        devices/<id>/commands/remote {seq, kind, body, t} kind "control" (= POST /api/control) or "config" (= POST /api/config)
+//        devices/<id>/commands/ack    {seq, code, body}    the answer, exactly what the local page would get
+//      Commands run on the main task through the same handlers as the local page, so they behave the same.
+//   3. TEST BUILDS ONLY: watches  devices/<id>/commands/testReset  and, when the cloud asks, wipes its
 //      setup (Wi-Fi kept), confirms back, and restarts. Same handshake as the AIDoser.
 // It runs in its own task on the other core, so slow internet never delays the lights or the web page.
 // The lights never depend on any of this.
@@ -682,6 +690,19 @@ static void ntpTick() {
 #define QUANTA_FB_API_KEY ""
 #endif
 #define CLOUD_STATE_EVERY_MS 60000UL
+#define CLOUD_POLL_IDLE_MS   10000UL              // check for remote commands this often when nobody is watching
+#define CLOUD_POLL_WATCH_MS  2000UL               // ... and this often while the remote page is open
+#define CLOUD_LIVE_EVERY_MS  3000UL               // live state while watched
+#define CLOUD_WATCH_HOLD_MS  60000UL              // "watched" lasts this long after the last watch ping
+
+// Requests from the cloud run through the same handlers as the web page: viaCloud makes them read
+// cloudReqBody and leave their answer in cloudResp instead of talking to the web server.
+static bool viaCloud = false;
+static String cloudReqBody, cloudResp;
+static int cloudRespCode = 200;
+// Hand-off between the cloud task (network, core 0) and loop() (settings and lights, core 1).
+enum : uint8_t { JOB_NONE, JOB_STATE, JOB_CONFIG, JOB_CONTROL, JOB_SETCONFIG };
+static volatile uint8_t cloudJob = JOB_NONE, cloudJobDone = 0;
 static String cloudId, cloudEmail, cloudPass, cloudKey;
 static String cloudToken, cloudErr;
 static uint32_t cloudTokenRenewAt = 0;
@@ -781,9 +802,84 @@ static void cloudTestPoll() {
 }
 #endif
 
+// Ask loop() to run one request, wait for the answer (cloudResp / cloudRespCode).
+static bool cloudRunJob(uint8_t job, const String &body = String()) {
+  cloudReqBody = body; cloudJobDone = 0; cloudJob = job;
+  for (int i = 0; i < 250 && !cloudJobDone; i++) vTaskDelay(20 / portTICK_PERIOD_MS);   // up to 5 s
+  bool ok = cloudJobDone; cloudJob = JOB_NONE; cloudJobDone = 0;
+  return ok;
+}
+// Wraps a JSON answer as {json:"...", ...}: stored as text so the database can't reorder or drop parts of it.
+static String cloudWrap(const String &json, const char *extraKey = nullptr, uint32_t extraVal = 0) {
+  JsonDocument d; d["json"] = json; d["t"][".sv"] = "timestamp";
+  if (extraKey) d[extraKey] = extraVal;
+  String out; serializeJson(d, out); return out;
+}
+static uint32_t cloudCfgSent = 0;                 // cfgGen last written to devices/<id>/config (0 = not yet)
+static bool cloudPutConfig() {
+  if (!cloudRunJob(JOB_CONFIG)) return false;
+  uint32_t gen = cfgGen;
+  String resp; int code = 0;
+  bool ok = cloudReq("PUT", cloudUrl("config"), cloudWrap(cloudResp, "gen", gen), &resp, &code) && code == 200;
+  if (ok) cloudCfgSent = gen ? gen : 1;
+  else if (code == 401 || code == 403) cloudToken = "";
+  return ok;
+}
+static bool cloudPutLive() {
+  if (!cloudRunJob(JOB_STATE)) return false;
+  String resp; int code = 0;
+  bool ok = cloudReq("PUT", cloudUrl("live"), cloudWrap(cloudResp), &resp, &code) && code == 200;
+  if (!ok && (code == 401 || code == 403)) cloudToken = "";
+  return ok;
+}
+// Reads devices/<id>/commands: the watch ping and any new remote command. Returns true while watched.
+static volatile bool cloudCmdRan = false;        // a remote command just ran: send the live state straight away
+static bool cloudPollCommands() {
+  static double lastWatch = -1; static uint32_t watchSeenMs = 0;
+  static double doneSeq = -1;                       // last command answered (-1 = not known yet)
+  String resp; int code = 0;
+  if (!cloudReq("GET", cloudUrl("commands"), "", &resp, &code) || code != 200) {
+    if (code == 401 || code == 403) cloudToken = "";
+    return millis() - watchSeenMs < CLOUD_WATCH_HOLD_MS && watchSeenMs;
+  }
+  JsonDocument d;
+  if (resp == "null" || deserializeJson(d, resp)) d.clear();
+  double w = d["watch"] | 0.0;
+  if (w > 0 && w != lastWatch) { if (lastWatch >= 0) watchSeenMs = millis(); lastWatch = w; }
+  if (watchSeenMs == 0 && w > 0 && lastWatch == w) {
+    // First look after a start: count as watched if the ping is recent (server time vs our clock).
+    if (timeValid() && fabs((double)nowEpoch() * 1000.0 - w) < CLOUD_WATCH_HOLD_MS) watchSeenMs = millis();
+  }
+  bool watched = watchSeenMs && millis() - watchSeenMs < CLOUD_WATCH_HOLD_MS;
+
+  JsonVariantConst cmd = d["remote"];
+  double seq = cmd["seq"] | -1.0, acked = d["ack"]["seq"] | -1.0;
+  if (doneSeq < 0) doneSeq = acked;                 // after a start, never re-run what was already answered
+  if (seq < 0 || seq == doneSeq) return watched;
+  doneSeq = seq;
+  // A command left waiting while the controller was off is dropped, not run late.
+  double sent = cmd["t"] | 0.0;
+  String kind = cmd["kind"] | "", body = cmd["body"] | "";
+  String reply; int rc = 200;
+  if (timeValid() && sent > 0 && fabs((double)nowEpoch() * 1000.0 - sent) > 120000.0) {
+    rc = 408; reply = "{\"error\":\"That request was too old, so it wasn't used. Try again.\"}";
+  } else if (kind == "control" || kind == "config") {
+    if (cloudRunJob(kind == "control" ? JOB_CONTROL : JOB_SETCONFIG, body)) { rc = cloudRespCode; reply = cloudResp; }
+    else { rc = 503; reply = "{\"error\":\"The controller was busy. Try again.\"}"; }
+    Serial.printf("Cloud: remote %s -> %d\n", kind.c_str(), rc);
+  } else {
+    rc = 400; reply = "{\"error\":\"That can only be done on the controller's own page.\"}";
+  }
+  JsonDocument a; a["seq"] = seq; a["code"] = rc; a["body"] = reply; a["t"][".sv"] = "timestamp";
+  String ab; serializeJson(a, ab);
+  cloudReq("PUT", cloudUrl("commands/ack"), ab, &resp, &code);
+  cloudCmdRan = true;
+  return true;                                      // someone just used it: treat as watched
+}
+
 static void cloudTask(void *) {
   cloudTls.setInsecure();                                        // encrypted, but the server's certificate isn't checked
-  uint32_t lastState = 0; bool first = true; uint8_t tick = 0; (void)tick;
+  uint32_t lastState = 0, lastPoll = 0, lastLive = 0; bool first = true, watched = false; uint8_t tick = 0; (void)tick;
   for (;;) {
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     if (cloudReload) { cloudReload = false; cloudLoadConfig(); first = true; }
@@ -798,13 +894,33 @@ static void cloudTask(void *) {
     uint32_t now = millis();
     if (first || now - lastState >= CLOUD_STATE_EVERY_MS) {
       lastState = now;
-      if (cloudPutState()) first = false; else vTaskDelay(10000 / portTICK_PERIOD_MS);
+      if (cloudPutState()) first = false; else { vTaskDelay(10000 / portTICK_PERIOD_MS); continue; }
     }
+    if (cloudCfgSent != (cfgGen ? cfgGen : 1)) cloudPutConfig();          // settings changed (here or remotely)
+    if (now - lastPoll >= (watched ? CLOUD_POLL_WATCH_MS : CLOUD_POLL_IDLE_MS)) {
+      lastPoll = now;
+      bool was = watched;
+      watched = cloudPollCommands();
+      if ((watched && !was) || cloudCmdRan) { lastLive = 0; cloudCmdRan = false; }   // just opened, or just used: send now
+    }
+    if (watched && millis() - lastLive >= CLOUD_LIVE_EVERY_MS) { lastLive = millis(); cloudPutLive(); }
   }
 }
 
+static void apiState(); static void apiConfigGet(); static void apiConfigPost(); static void apiControl();
 // Called from loop(): the parts that must run on the main task.
 static void cloudLoopTick() {
+  if (cloudJob != JOB_NONE && !cloudJobDone) {
+    viaCloud = true; cloudResp = ""; cloudRespCode = 200;
+    switch (cloudJob) {
+      case JOB_STATE: apiState(); break;
+      case JOB_CONFIG: apiConfigGet(); break;
+      case JOB_CONTROL: apiControl(); break;
+      case JOB_SETCONFIG: apiConfigPost(); break;
+    }
+    viaCloud = false; cloudReqBody = "";
+    cloudJobDone = 1;
+  }
 #if defined(QUANTA_TEST_BUILD) && QUANTA_TEST_BUILD
   if (cloudResetState == 1) {                                    // wipe like a brand-new unit: settings AND home Wi-Fi (cloud login is kept), so it restarts in hotspot mode
     prefs.remove("cfgA"); prefs.remove("cfgB"); prefs.remove("ovr"); prefs.remove("uiExtra");
@@ -830,8 +946,10 @@ static const char *timeSrcId() {
   static const char *s[] = {"none", "rtc", "internet", "phone", "estimated"}; return s[timeSrc];
 }
 
+static String reqBody() { return viaCloud ? cloudReqBody : server.arg("plain"); }
 static void sendJson(JsonDocument &d, int code = 200) {
   String out; serializeJson(d, out);
+  if (viaCloud) { cloudResp = out; cloudRespCode = code; return; }
   server.sendHeader("Cache-Control", "no-store");
   server.send(code, "application/json", out);
 }
@@ -842,6 +960,7 @@ static void sendError(int code, const char *msg) {
 static void apiState() {
   JsonDocument d;
   d["fw"] = FW_VERSION;
+  d["cfgGen"] = cfgGen;                            // goes up on every save: open pages reload the settings
 #if defined(QUANTA_TEST_BUILD) && QUANTA_TEST_BUILD
   d["testBuild"] = true;                           // TEST ONLY: lets the dashboard obey the cloud "Reset & Start Over"
 #endif
@@ -895,7 +1014,7 @@ static void apiConfigGet() { JsonDocument d; configToJson(d); sendJson(d); }
 
 static void apiConfigPost() {
   JsonDocument d;
-  if (deserializeJson(d, server.arg("plain"))) { sendError(400, "Settings weren't valid JSON"); return; }
+  if (deserializeJson(d, reqBody())) { sendError(400, "Settings weren't valid JSON"); return; }
   Config next = cfg;
   configFromJson(d.as<JsonVariantConst>(), next);
   bool tzChanged = strcmp(next.tz, cfg.tz) != 0;
@@ -908,7 +1027,7 @@ static void apiConfigPost() {
 
 static void apiControl() {
   JsonDocument d;
-  if (deserializeJson(d, server.arg("plain"))) { sendError(400, "Request wasn't valid JSON"); return; }
+  if (deserializeJson(d, reqBody())) { sendError(400, "Request wasn't valid JSON"); return; }
   if (d["time"].is<uint32_t>()) {                            // phone's clock: used when there's no internet
     uint32_t e = d["time"];
     if (e > 1700000000 && (timeSrc != TS_NTP || nowEpoch() - lastTimeSync > 86400)) {

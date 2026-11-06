@@ -223,6 +223,11 @@ body.embed .toast{bottom:auto;top:calc(12px + env(safe-area-inset-top,0px))}
 .otabar.indet i{width:35%!important;animation:ind 1.2s ease-in-out infinite}
 @keyframes ind{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
 @media (prefers-reduced-motion: reduce){ *{transition:none!important} .spin,.otabar.indet i{animation-duration:3s} }
+
+/* Remote (Quanta website): only Now and Schedule; setup changes stay on the controller's own page. */
+body.remote nav.tabs button[data-tab="lights"], body.remote nav.tabs button[data-tab="stats"], body.remote nav.tabs button[data-tab="settings"],
+body.remote [data-act="aq-add"], body.remote [data-act="aq-edit"], body.remote [data-act="wizard"], body.remote [data-act="x-edit"] { display:none !important; }
+body.remote nav.tabs .in{grid-template-columns:repeat(2,1fr)}
 </style>
 
 <header class="top">
@@ -816,11 +821,17 @@ const Sim = (() => {
 // API
 // =====================================================================================
 let demo = false;
+// Remote: on the Quanta website (remote.html) the same page works the controller through Quanta Cloud.
+// window.QuantaRemote (remote_adapter.js) answers the same requests. Only Now and Schedule are offered there.
+const remote = !!window.QuantaRemote;
+if(remote) document.body.classList.add("remote");
 async function get(path){
+  if(remote) return QuantaRemote.get(path);
   if(demo) return Sim.get(path);
   const r = await fetch(path, {cache:"no-store"}); if(!r.ok) throw new Error(r.status); return r.json();
 }
 async function post(path, body){
+  if(remote) return QuantaRemote.post(path, body);
   if(demo) return Sim.post(path, body);
   const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
   const j = await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error || ("Error " + r.status)); return j;
@@ -2091,11 +2102,21 @@ async function otaPoll(){
 }
 
 async function control(body, msg){
+  // Through Quanta Cloud the answer takes a few seconds: show the chosen mode straight away.
+  if(remote && body.mode && S){ S = Object.assign({}, S, {mode: body.mode}); render(); if(msg) toast("Sending to the controller…"); }
   try { S = await post("/api/control", body); if(msg) toast(msg); render(); } catch(e){ toast(e.message || "Couldn't reach the controller"); }
 }
+let saving = false;
 async function saveConfig(){
+  if(saving) return;
+  // Show it's working straight away: through Quanta Cloud a save takes a few seconds.
+  saving = true;
+  const btn = $("saveBtn"), dis = $("discardBtn"), label = btn ? btn.textContent : "Save";
+  if(btn){ btn.textContent = "Saving…"; btn.disabled = true; } if(dis) dis.disabled = true;
+  if(remote) toast("Sending to the controller…");
   try { C = normalize(await post("/api/config", D)); D = clone(C); toast("Saved. The controller is using it now."); render(); }
   catch(e){ toast("Not saved: " + (e.message || "couldn't reach the controller")); }
+  finally { saving = false; if(btn){ btn.textContent = label; btn.disabled = false; } if(dis) dis.disabled = false; }
 }
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("[data-act]"); if(!b) return;
@@ -2239,13 +2260,33 @@ $("helpBtn").addEventListener("click", () => {
 // =====================================================================================
 function render(){
   if(!S || !C) return;
+  if(remote && tab !== "now" && tab !== "schedule") tab = "now";
   document.querySelectorAll("nav.tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab===tab ? "page" : "false"));
   ({now:renderNow, schedule:renderSchedule, lights:renderLights, stats:renderStats, settings:renderSettings})[tab]();
   renderChrome();
 }
+// Settings saved somewhere else (the other page, or online) show up here by themselves:
+// /api/state carries cfgGen, which goes up on every save.
+let cfgGenSeen, cfgGenWarned;
+async function followSaves(){
+  if(S.cfgGen === undefined) return;
+  if(cfgGenSeen === undefined || saving){ cfgGenSeen = S.cfgGen; return; }
+  if(S.cfgGen === cfgGenSeen) return;
+  if(dirty() || wiz){                               // never throw away what's being edited here
+    if(cfgGenWarned !== S.cfgGen){ cfgGenWarned = S.cfgGen;
+      toast("These settings were just changed on another screen. Save keeps yours; Discard loads theirs."); }
+    return;
+  }
+  try {
+    const nc = await get("/api/config");
+    if(nc.__gen !== undefined && nc.__gen !== S.cfgGen) return;   // online: the new settings haven't arrived yet
+    C = normalize(nc); D = clone(C); cfgGenSeen = S.cfgGen; render();
+  } catch(e){}
+}
 async function poll(){
   try {
     S = await get("/api/state");
+    await followSaves();
     renderChrome();
     if(tab==="now") liveNow(); else if(tab==="lights") liveLights(); else if(tab==="stats") liveStats(); else if(tab==="schedule" && !document.querySelector(".chartbox:active")) drawSched();
   } catch(e){ /* keep last state; next poll retries */ }
@@ -2259,7 +2300,9 @@ async function poll(){
     try { S = await get("/api/state"); C = await get("/api/config"); break; }
     catch(e){
       if(DEMO_OK){ demo = true; S = await get("/api/state"); C = await get("/api/config"); break; }
-      $("page").innerHTML = `<section class="card"><h2>Connecting…</h2><p class="small">Can't reach the controller yet. Make sure this phone or computer is on the same Wi-Fi as the controller (or on its <b>Quanta-</b> hotspot). Trying again…</p></section>`;
+      $("page").innerHTML = remote
+        ? `<section class="card"><h2>Connecting…</h2><p class="small">Waiting for the controller to answer through Quanta Cloud. It needs power and its home Wi-Fi. This can take up to 20 seconds…</p><p class="small">${esc(e.message || "")}</p></section>`
+        : `<section class="card"><h2>Connecting…</h2><p class="small">Can't reach the controller yet. Make sure this phone or computer is on the same Wi-Fi as the controller (or on its <b>Quanta-</b> hotspot). Trying again…</p></section>`;
       await new Promise(r => setTimeout(r, 3000));
     }
   }
@@ -2279,9 +2322,12 @@ async function poll(){
   if(/[?&]phone\b/.test(location.search)) framed = false;   // shown inside a fixed-size phone frame: use the real phone layout
   if(demo && framed){ document.body.classList.add("embed"); const m = $("main"); m.insertBefore(document.querySelector("nav.tabs"), m.firstChild); m.insertBefore($("savebar"), $("page")); }
   C = normalize(C); D = clone(C);
-  if(!demo && (!S.time.valid || S.time.source==="estimated")) { try { S = await post("/api/control", {time:Math.floor(Date.now()/1000)}); } catch(e){} }
+  if(!demo && !remote && (!S.time.valid || S.time.source==="estimated")) { try { S = await post("/api/control", {time:Math.floor(Date.now()/1000)}); } catch(e){} }
   render();
-  if(!C.setupDone) openWizard();
+  if(!C.setupDone){
+    if(remote) $("page").innerHTML = `<section class="card"><h2>Finish setting up first</h2><p class="small">This controller hasn't been set up yet. Open its own page on your home Wi-Fi (for example <b>${esc((S.sys && S.sys.mdns) || "quanta")}.local</b>) and run the setup assistant. After that you can control it from here.</p></section>`;
+    else openWizard();
+  }
   setTimeout(poll, 2000);
 })();
 })();

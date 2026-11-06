@@ -238,6 +238,10 @@ def main():
     firebase_json = firebase_dir / "firmware.json"
     copy_verified(release_bin, firebase_bin)
     shutil.copy2(release_json, firebase_json)
+    remote_tool = PROJECT_DIR / "tools" / "build_remote.py"
+    if remote_tool.is_file():                     # the website's remote control page, from the same phone page
+        if subprocess.run([sys.executable, str(remote_tool), str(public)], cwd=PROJECT_DIR).returncode:
+            fail("tools/build_remote.py failed.")
     if json.loads(firebase_json.read_text(encoding="utf-8")) != manifest:
         fail(f"Manifest copy verification failed:\n{firebase_json}")
 
