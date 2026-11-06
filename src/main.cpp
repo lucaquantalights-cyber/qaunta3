@@ -1,5 +1,6 @@
 // Quanta Controller firmware — ESP32, 4 x 3.5 mm jacks, 8 x 0-10 V outputs, web GUI.
 //
+//
 // Reliability rules this file is built around:
 //  1. The schedule runs entirely on the box from a battery-backed clock. No internet, phone or
 //     cloud is needed for the lights to do the right thing.
@@ -686,11 +687,7 @@ static void ntpTick() {
 #ifndef QUANTA_FB_DB_URL
 #define QUANTA_FB_DB_URL "https://quanta-f9c4c-default-rtdb.firebaseio.com"
 #endif
-<<<<<<< HEAD
 #ifndef QUANTA_FB_API_KEY                       // Firebase "Web API key" (Project settings > General). .
-=======
-#ifndef QUANTA_FB_API_KEY                       // Firebase "Web API key" (Project settings > General). Not a .
->>>>>>> 3046063dfa2c8520b5f684b75fe4090eebc0f575
 #define QUANTA_FB_API_KEY ""
 #endif
 #define CLOUD_STATE_EVERY_MS 60000UL
