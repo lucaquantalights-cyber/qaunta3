@@ -266,7 +266,7 @@ body.embed .toast{bottom:auto;top:calc(12px + env(safe-area-inset-top,0px))}
 // =====================================================================================
 // Shared model (mirrors firmware lib/QuantaCore/src/core.h)
 // =====================================================================================
-const JACKS = 4, CHANNELS = 8, MAX_GROUPS = 8, MAX_POINTS = 16, MAX_PHOTO = 12, NCOL = 12;
+const JACKS = 4, CHANNELS = 8, MAX_GROUPS = 8, MAX_POINTS = 16, MAX_PHOTO = 12, NCOL = 12, MAX_AQ = 4;   // MAX_AQ: aquariums / expert groups
 const HELIX_IN = [23, 35, 47, 59, 71], HELIX_W = [38, 57, 74, 92, 111];
 // Guided mode always has these six groups (curves), one per kind of channel. Colours are fixed.
 const GG = ["Blue", "White", "Atlas", "Tropic Sun", "Reef Crest", "Meso Blue"];
@@ -387,8 +387,10 @@ const ATLAS_INT = [25, 40, 55];
 const tankInt = (kind, tank) => kind === "atlas" ? ATLAS_INT[tank] : TANKS[tank].intensity;
 // Set every intensity of a setup to its tank type's starting point.
 function setTankInts(c){ const k = c.setup ? c.setup.kind : "altair"; c.intensity = tankInt(k, c.tank); c.intenIn = Math.max(10, c.intensity - 15); c.intenMB = TANKS[c.tank].intensity; }
-function aqPush(c){ const a = c.aqs && c.aqs[c.sel|0]; if(a) AQ_KEYS.forEach(k => a[k] = clone(c[k])); }
-function aqPull(c, i){ const a = c.aqs && c.aqs[i]; if(!a) return; c.sel = i; AQ_KEYS.forEach(k => c[k] = clone(a[k])); }
+// Expert: the master dimmer and acclimation belong to the whole controller, not to one group.
+const aqKeys = c => c.expert ? AQ_KEYS.filter(k => k !== "intensity" && k !== "accl") : AQ_KEYS;
+function aqPush(c){ const a = c.aqs && c.aqs[c.sel|0]; if(a) aqKeys(c).forEach(k => a[k] = clone(c[k])); }
+function aqPull(c, i){ const a = c.aqs && c.aqs[i]; if(!a) return; c.sel = i; aqKeys(c).forEach(k => { if(a[k] !== undefined) c[k] = clone(a[k]); }); }
 const aqOn = a => ((a.off - TANKS[a.tank].photo) % 1440 + 1440) % 1440;
 // The aquarium a group belongs to (its intensity and acclimation); expert mode: the whole controller.
 // A group's intensity: an output with its own intensity carries it; otherwise its aquarium's.
@@ -439,7 +441,7 @@ function applyGuided(c){
 const PHOTO_PRESETS = [["Coral Glow", 1.0, 0.15], ["True Color", 0.6, 1.0], ["Vibrant Fish", 0.85, 1.0]];
 function guidedPhotos(c){
   const roleOf = g => g.role || (/White|Atlas/.test(g.name) ? "white" : "blue");
-  const aqs = (!c.expert && c.aqs && c.aqs.length) ? c.aqs.map((_,i)=>i) : [undefined];
+  const aqs = (c.aqs && c.aqs.length) ? c.aqs.map((_,i)=>i) : [undefined];        // expert groups are aquariums too
   const out = [];
   aqs.forEach(ai => PHOTO_PRESETS.forEach(([name, b, w]) => out.push(Object.assign({name, minutes:30,
     lvl:c.groups.map((g,gi) => (ai !== undefined && g.aq !== ai) ? null : Math.round((roleOf(g) === "blue" ? b : w) * gInt(c, gi) * 10))}, ai === undefined ? {} : {aq:ai}))));
@@ -515,7 +517,7 @@ function setFixture(c, j, fx, len){
     if(!c.expert){ const g = F.def[s]; J.ch[s].group = (g>=0 && g < c.groups.length) ? g : -1; }
     J.watts[s] = fixtureWatts(fx, s, J.len);
   }
-  if(c.expert){ expertGroupsFor(c, j); pruneGroups(c); }
+  if(c.expert){ if(fx !== "other") [0,1].forEach(s => { if(s && !F.two) J.ch[s].group = -1; }); }   // groups: exRebuild() after the name is set
 }
 // Bring any config (older firmware, a backup file) up to this version's rules.
 function normalize(c){
@@ -530,6 +532,7 @@ function normalize(c){
   if(!c.aqs || !c.aqs.length){ c.aqs = [{outs:planOuts(c.setup).map((_,k)=>k)}]; c.sel = 0; }
   c.sel = clamp(c.sel|0, 0, c.aqs.length-1); aqPush(c);
   if(!c.expert) applyGuided(c);
+  else { exMembers(c); if(!exValid(c)) exRebuild(c); }
   c.groups.forEach(G => { if(!(G.color >= 0 && G.color < NCOL)) G.color = 6; });
   return c;
 }
@@ -537,26 +540,31 @@ const OUT_FS = 2.048*4.9;
 const levelToMv = (lvl, cal) => { if(!lvl) return 0; const code = clamp(Math.round(lvl/1000*10*cal/100/OUT_FS*4095),0,4095); return Math.round(code*OUT_FS*1000/4095); };
 
 // ---------- guided <-> expert ----------
-// Expert: every in-use channel gets its own schedule, named after its output, copied from the guided curve
-// it followed (with the overall intensity baked in, so what you see is what the light does).
+// Expert keeps the aquariums as groups (Luca, Nov 3): every light keeps following its aquarium's curves, with
+// the intensity baked in, so what you see is what the light does. Grouping is changed under Lights › Group.
 function toExpert(c){
-  aqPush(c); const old = c.groups, groups = [], from = [];
-  let other = 0;
-  c.jacks.forEach((J,j) => sidesOf(c, j).forEach(s => {
-    const k = J.ch[s], src = old[k.group];
-    groups.push({name:`OUT${j+1} ${sideName(J,s)}`, color: sideColor(J, s, other++),
-      points: src ? src.points.map(([m,v]) => [m, Math.round(v*gInt(c, k.group)/100)]) : rampCurve(false, 500, 630, 1260)});
-    from.push(k.group); k.group = groups.length-1;
-  }));
-  c.jacks.forEach((J,j) => [0,1].forEach(s => { if(!channelInUse(c, j*2+s)) J.ch[s].group = -1; }));
-  c.photos.forEach(p => { p.lvl = from.map(g => p.lvl[g] || 0); });
-  c.groups = groups.length ? groups : [{name:"Schedule 1", color:6, points:rampCurve(false, 500, 630, 1260)}];
+  aqPush(c);
+  c.groups = c.groups.map((G,gi) => Object.assign(clone(G), {points: G.points.map(([m,v]) => [m, Math.round(v*gInt(c, gi)/100)])}));
+  c.aqs.forEach(a => { a.outAdj = []; });
   c.intensity = 100; c.expert = true;
   if(c.accl.on) c.accl.startPct = Math.max(10, c.accl.startPct);
+  exRebuild(c);
   return c;
 }
-// Back to guided: the six fixed groups are rebuilt from tank type, spectrum and lights-off.
+// Back to guided: each group's curves are rebuilt from its setup (tank type, spectrum and lights-off).
 function toGuided(c){
+  if(c.expert && c.aqs && c.aqs.length){
+    // Each group becomes an aquarium described by what's plugged in now, its outputs in Guided's order
+    // (Atlas or Altair first, then Meso Blue, Reef Crest, Tropic Sun). 3rd-party equipment needs Expert.
+    aqPush(c);
+    const order = {atlas:0, altair_210:0, altair_100:0, helix_mb:1, helix_rcd:2, helix_ts:3};
+    c.aqs.forEach((a, i) => { const nm = aqNameOf(c, i);
+      a.outs = a.outs.filter(j => order[c.jacks[j].fixture] !== undefined).sort((x,y) => order[c.jacks[x].fixture] - order[c.jacks[y].fixture] || x - y);
+      a.setup = setupForOuts(c, a.outs, nm); a.outNames = a.outs.map(j => c.jacks[j].name); a.outAdj = []; });
+    const keep = c.aqs.filter(a => a.outs.length);
+    c.aqs = keep.length ? keep : [c.aqs[0]]; c.sel = 0;
+    c.expert = false; aqPull(c, 0);
+  }
   c.expert = false;
   if(!c.setup || c.setup.kind === "custom") c.setup = setupFromJacks(c);
   setTankInts(c);
@@ -564,35 +572,146 @@ function toGuided(c){
   c.photos = []; applyGuided(c); c.photos = guidedPhotos(c);
   return c;
 }
-// Expert: make sure each in-use channel of output j has a schedule (a new product gets fresh ones).
-function expertGroupsFor(c, j){
-  const J = c.jacks[j];
-  if(J.fixture==="other") return;                            // 3rd party: the user picks what tip and ring follow
-  [0,1].forEach(s => {
-    const k = J.ch[s];
-    if(J.fixture==="none" || (s && !FIXTURES[J.fixture].two)){ k.group = -1; return; }
-    const G = c.groups[k.group];
-    if(G){
-      const shared = c.jacks.some((J2,j2) => J2.ch.some((k2,s2) => (j2!==j || s2!==s) && k2.group===k.group && channelInUse(c, j2*2+s2)));
-      if(!shared){ G.name = `OUT${j+1} ${sideName(J,s)}`; G.color = sideColor(J, s, 0); }
-      return;
-    }
-    if(c.groups.length >= MAX_GROUPS){ k.group = 0; return; }
-    const tpl = c.groups[0] ? c.groups[0].points : rampCurve(false, 500, 630, 1260);
-    c.groups.push({name:`OUT${j+1} ${sideName(J,s)}`, color: sideColor(J, s, c.groups.length), points: clone(tpl)});
-    c.photos.forEach(p => p.lvl.push(0));
-    k.group = c.groups.length-1;
-  });
-  pruneGroups(c);
+
+// ---------- expert groups (Luca, Nov 3: "make groups for the lights and name them") ----------
+// An expert group is an aquarium: c.aqs[i], its name (setup.name) and its outputs (outs). On the Lights page each
+// output has a Group field: type the same group name on several outputs to group them. A group has one schedule
+// per kind of channel (Blue, White, Helix MB...), shared by every light in it. An output on its own is a group of one.
+const keyOf = G => G.name.replace(/^.*: /, "");
+const aqNameOf = (c, i) => i === (c.sel|0) ? c.setup.name : c.aqs[i].setup.name;
+const roleOfKey = k => /White|Atlas|RCD|TS|Reef Crest|Tropic|Ring/.test(k) ? "white" : "blue";
+function uniqueAqName(c, base){
+  base = String(base || "Group").slice(0, 31); let n = base, k = 2;
+  while(c.aqs.some((_,i) => aqNameOf(c, i).toLowerCase() === n.toLowerCase())) n = `${base.slice(0, 28)} ${k++}`;
+  return n;
 }
-// Expert: drop schedules nothing follows any more (keeps at least one).
-function pruneGroups(c){
-  for(let g = c.groups.length-1; g >= 0 && c.groups.length > 1; g--){
-    const used = c.jacks.some(J => J.ch.some(k => k.group===g));
-    if(used) continue;
-    c.groups.splice(g,1); c.photos.forEach(p => p.lvl.splice(g,1));
-    c.jacks.forEach(J => J.ch.forEach(k => { if(k.group > g) k.group--; }));
+// A setup that describes these outputs, so Guided mode can take the group over later.
+function setupForOuts(c, outs, name){
+  const s = defaultSetup(), Js = outs.map(j => c.jacks[j]), n = a => a.reduce((t,J) => t + J.count, 0); s.name = name;
+  const alt = Js.filter(J => J.fixture === "altair_100" || J.fixture === "altair_210"), hel = Js.filter(J => isHelix(J.fixture)), atl = Js.filter(J => J.fixture === "atlas");
+  const hn = fx => clamp(n(hel.filter(J => J.fixture === fx)), 0, 6);
+  if(atl.length){ s.kind = "atlas"; s.atlas = clamp(n(atl), 1, 6); s.amb = hn("helix_mb"); s.par = false; }
+  else if(alt.length){ s.kind = "altair"; s.model = alt[0].fixture; s.qty = clamp(n(alt), 1, 6); s.par = false;
+    if(alt.length > 1 && s.qty >= 3){ s.par = true; s.out = clamp(alt[0].count, 1, s.qty - 1); s.inn = s.qty - s.out; } }   // two outputs: outside + inside
+  else if(hel.length){ s.kind = "aio"; s.mb = hn("helix_mb"); s.rcd = hn("helix_rcd"); s.ts = hn("helix_ts"); s.len = hel[0].len|0; if(!s.mb && !s.rcd && !s.ts) s.rcd = 1; }
+  return s;
+}
+function newAq(c, name, outs){
+  aqPush(c); const m = (c.aqs && c.aqs[c.sel|0]) || c, a = {};
+  AQ_KEYS.forEach(k => a[k] = clone(m[k] !== undefined ? m[k] : c[k]));
+  a.setup = setupForOuts(c, outs, name); a.outs = outs.slice(); a.outNames = outs.map(j => c.jacks[j].name); a.outAdj = [];
+  return a;
+}
+// Every output with something plugged in belongs to exactly one group; empty groups go away.
+function exMembers(c){
+  if(!c.aqs || !c.aqs.length){ c.aqs = [{outs:[]}]; c.sel = 0; }
+  aqPush(c);
+  const live = j => c.jacks[j].fixture !== "none", seen = new Set();
+  c.aqs.forEach(a => { a.outs = (a.outs || []).filter(j => j >= 0 && j < JACKS && live(j) && !seen.has(j) && !!seen.add(j)); });
+  c.jacks.forEach((J,j) => { if(!live(j) || seen.has(j)) return; seen.add(j);
+    if(c.aqs.length < MAX_AQ) c.aqs.push(Object.assign(newAq(c, uniqueAqName(c, J.name), [j]), {auto:true})); else c.aqs[c.aqs.length - 1].outs.push(j); });
+  c.aqs.forEach((a, i) => { if(a.auto && a.outs.length === 1 && aqNameOf(c, i) !== c.jacks[a.outs[0]].name){       // named after its output
+    const others = c.aqs.some((b, k) => k !== i && aqNameOf(c, k).toLowerCase() === c.jacks[a.outs[0]].name.toLowerCase());
+    if(!others) setAqName(c, i, c.jacks[a.outs[0]].name); } });
+  for(let r = c.aqs.length - 1; r >= 0 && c.aqs.length > 1; r--){
+    if(c.aqs[r].outs.length) continue;
+    c.aqs.splice(r, 1);
+    c.groups.forEach(G => { if(G.aq === r) delete G.aq; else if(G.aq > r) G.aq--; });
+    c.photos.forEach(p => { if(p.aq === r) delete p.aq; else if(p.aq > r) p.aq--; });
+    if((c.sel|0) > r) c.sel--; else if((c.sel|0) === r) c.sel = 0;
   }
+  c.sel = clamp(c.sel|0, 0, c.aqs.length - 1);
+  c.aqs.forEach(a => { a.outs.sort((x,y) => x - y); a.outNames = a.outs.map(j => c.jacks[j].name); a.outAdj = []; });
+  c.jacks.forEach((J,j) => J.aq = c.aqs.findIndex(a => a.outs.includes(j)));
+  aqPull(c, c.sel|0);
+}
+// The schedules match the groups: every channel follows a schedule of its own group.
+function exValid(c){
+  if(!c.photos.every(p => p.lvl.length === c.groups.length)) return false;
+  for(let ch = 0; ch < CHANNELS; ch++){
+    if(!channelInUse(c, ch)) continue;
+    const J = c.jacks[ch>>1], G = c.groups[J.ch[ch&1].group];
+    if(!G || G.aq !== J.aq) return false;
+  }
+  return c.groups.every(G => G.aq >= 0 && G.aq < c.aqs.length);
+}
+// Rebuild the schedules from the groups, keeping every curve that still has a channel on it.
+function exRebuild(c){
+  exMembers(c);
+  const old = c.groups, sig = G => `${G.aq}|${keyOf(G)}`, oldSig = old.map(sig).join(",");
+  const keys = c.aqs.map(() => []), want = {};
+  const pass = newcomers => c.aqs.forEach((a, ai) => a.outs.forEach(j => {
+    const J = c.jacks[j];
+    [0,1].forEach(s => {
+      const k = J.ch[s], ch = j*2 + s;
+      if(J.fixture !== "other" && s && !FIXTURES[J.fixture].two){ k.group = -1; return; }
+      if(J.fixture === "other" && k.group === -1) return;                 // 3rd party: this channel isn't used
+      const G = old[k.group], side = sideName(J, s);
+      // Keeps its schedule while it's in that group and still the same kind of light (Outside Blue is still Blue).
+      const kd = keyOf(G || {name:""}), product = ["Atlas","Helix TS","Helix RCD","Helix MB"].includes(kd);   // a schedule named after a product
+      const mine = !!G && G.aq === ai && (J.fixture === "other" || kd === side || kd.endsWith(" " + side) || (G.kind ? G.kind === J.fixture : !product));
+      if(mine === newcomers) return;
+      let key;
+      if(mine) key = keyOf(G);                                            // already in this group: keeps its schedule
+      else { const base = sideName(J, s), have = keys[ai].map(e => e.key);   // joining: the group's schedule for this kind of light
+        key = J.fixture === "other" ? base : (have.find(x => x === base) || have.find(x => x.endsWith(" " + base)) || base); }
+      let e = keys[ai].find(x => x.key === key);
+      if(!e){ e = {key, kind: J.fixture, color: G && mine ? G.color : sideColor(J, s, keys[ai].length), role: roleOfKey(key),
+        pts: clone(G ? G.points : keys[ai][0] ? keys[ai][0].pts : rampCurve(false, 500, 630, 1260))}; keys[ai].push(e); }
+      want[ch] = e;
+    });
+  }));
+  pass(false); pass(true);        // channels already in their group first, so the ones joining it share their schedules
+  const groups = [];
+  c.aqs.forEach((a, ai) => keys[ai].forEach(e => { e.gi = groups.length;
+    groups.push({name: `${aqNameOf(c, ai)}: ${e.key}`.slice(0, 55), color: e.color, role: e.role, aq: ai, kind: e.kind, points: e.pts}); }));
+  c.jacks.forEach((J,j) => [0,1].forEach(s => { const e = want[j*2 + s]; J.ch[s].group = e ? e.gi : -1; }));
+  c.groups = groups.length ? groups : [{name:"Schedule 1", color:6, role:"blue", points:rampCurve(false, 500, 630, 1260)}];
+  // Pictures: Coral Glow, True Color and Vibrant Fish for each group, kept while the groups' schedules stay the same.
+  if(c.groups.map(sig).join(",") !== oldSig || !c.photos.every(p => p.lvl.length === c.groups.length)) c.photos = guidedPhotos(c);
+}
+// Lights › Group: put output j in the group with this name (a new group if no group has it).
+function exSetGroup(c, j, name){
+  exMembers(c);
+  const J = c.jacks[j], cur = J.aq; name = String(name || "").trim().slice(0, 31) || J.name;
+  let ai = c.aqs.findIndex((_,i) => aqNameOf(c, i).toLowerCase() === name.toLowerCase());
+  if(ai === cur) return true;
+  if(ai < 0 && cur >= 0 && c.aqs[cur].outs.length === 1){ setAqName(c, cur, name); c.aqs[cur].auto = false; exRebuild(c); return true; }   // on its own: rename its group
+  if(ai < 0){
+    if(c.aqs.length >= MAX_AQ){ toast(`Up to ${MAX_AQ} groups. Type the name of an existing group to join it.`); return false; }
+    c.aqs.push(newAq(c, name, [j])); ai = c.aqs.length - 1;
+  }
+  if(cur >= 0) c.aqs[cur].outs = c.aqs[cur].outs.filter(x => x !== j);
+  if(!c.aqs[ai].outs.includes(j)) c.aqs[ai].outs.push(j);
+  c.aqs[ai].auto = false;
+  [cur, ai].forEach(i => { if(i >= 0 && c.aqs[i].outs.length){ const st = setupForOuts(c, c.aqs[i].outs, aqNameOf(c, i)); c.aqs[i].setup = st; if(i === (c.sel|0)) c.setup = clone(st); } });
+  exRebuild(c);
+  return true;
+}
+// Lights › Your groups: rename a group.
+function exRename(c, i, name){
+  name = String(name || "").trim().slice(0, 31); if(!name) return false;
+  if(c.aqs.some((_,k) => k !== i && aqNameOf(c, k).toLowerCase() === name.toLowerCase())){
+    toast("Another group already has that name. To put lights together, type that name on each output."); return false; }
+  setAqName(c, i, name); c.aqs[i].auto = false; exRebuild(c); return true;
+}
+// "Altair 210 × 2 · OUT 1, OUT 2"
+function exSummary(c, i){
+  const outs = c.aqs[i].outs, n = {};
+  outs.forEach(j => { const J = c.jacks[j], k = fxName(J); n[k] = (n[k] || 0) + J.count; });
+  return Object.entries(n).map(([k, v]) => `${k}${v > 1 ? ` × ${v}` : ""}`).join(", ") + " · " + outs.map(j => "OUT " + (j+1)).join(", ");
+}
+// All the schedules of a group: when the first one starts and the last one ends.
+function groupWindow(c, gs){
+  let on = 1440, off = -1;
+  gs.forEach(g => { const w = c.groups[g] && curveWindow(c.groups[g]); if(w){ on = Math.min(on, w[0]); off = Math.max(off, w[1]); } });
+  return off < 0 ? null : [on, off];
+}
+// Move a whole group to a new lights-on / lights-off window, stretching every curve in it.
+function setGroupWindow(c, gs, on, off){
+  const w = groupWindow(c, gs); if(!w) return;
+  const oldLen = (w[1] - w[0]) || 1, len = ((off - on) % 1440 + 1440) % 1440 || 1440;
+  gs.forEach(g => { const G = c.groups[g]; G.points = G.points.map(([m,v]) => [Math.round(on + (m - w[0]) / oldLen * len) % 1440, v]).sort((a,b) => a[0] - b[0]); });
 }
 function defaultPhotos(){
   return [{name:"Coral glow", minutes:30, lvl:[1000,80,250,150,250,1000]}, {name:"True color", minutes:30, lvl:[500,1000,1000,1000,1000,500]}];
@@ -648,11 +767,11 @@ const Sim = (() => {
       let status = "idle"; if(use){ status = (mv<1000||mv>9000) ? "unknown" : (ua>=40 ? "ok" : "no_load"); }
       ch.push({lvl:t, mv, amp, status, ua});
     }
-    return {fw:"2.5.0 (demo)", time:{epoch:nowE(), valid:true, source:"internet", sec:secOfDay(), tz:cfg.tz, lastSync:nowE()-3100, rtcOk:true},
+    return {fw:"2.5.0 (demo)", time:{epoch:nowE(), valid:true, source:"internet", sec:secOfDay(), tz:cfg.tz, lastSync:nowE()-3100, rtcOk:true, lastNtp:nowE()-3100, battWarn:false, rtcEpoch:nowE(), rtcDiff:0},
       mode:gl.mode, until:ovr.until, photo:ovr.photo, mins:ovr.mins, ramping:false, identify: Date.now()<identUntil ? identify : -1,
       accl:acclFactor(cfg,nowE()), groups:gl.g, ch,
-      sys:{uptime:nowE()-boot, heap:171234, boots:1, reset:"power_on", outageStart:0, outageEnd:0, tempC:31.5,
-           dacOk:true, adcOk:true, wifi:"connected", ssid:"ReefRoom", rssi:-61, ip:"192.168.1.48", ap:false, apName:"Quanta-3F2A",
+      sys:{uptime:nowE()-boot, online:nowE()-boot, heap:171234, boots:1, reset:"power_on", outageStart:0, outageEnd:0, tempC:31.5,
+           dacOk:true, adcOk:true, wifi:"connected", ssid:"ReefRoom", rssi:-61, ip:"192.168.1.48", mdns:"quanta3", ap:false, apName:"Quanta-3F2A",
            todayWh: (nowE()-boot)/3600*90, yesterdayWh:0},
       ota:Object.assign({}, simOta)};
   }
@@ -790,6 +909,8 @@ function healthChecks(){
   if(!t.valid) out.push({s:"bad", t:"The clock isn't set", d:"The schedule can't run until the controller knows the time. Lights are held at 25%.", fix:"clock"});
   else if(t.source==="estimated") out.push({s:"warn", t:"Time was estimated after a power cut", d:"The backup battery clock had lost time. Replace the CR2032 coin cell, then set the clock.", fix:"clock"});
   else out.push({s:"ok", t:"Clock is right", d: t.source==="internet" ? `Set from the internet ${fmtDur(t.epoch - t.lastSync)} ago. The battery clock keeps time through power cuts.` : t.source==="phone" ? "Set from a phone. Connect to Wi-Fi with internet for automatic corrections." : "Running from the battery-backed clock."});
+  if(t.battWarn && t.valid && t.source!=="estimated") out.push({s:"warn", t:"Replace the clock battery", d:"The battery clock stopped while the controller was unplugged, so its CR2032 coin cell is flat or missing. The time is right now, but fit a new CR2032 so it keeps time through the next power cut."});
+  else if(!t.rtcOk) out.push({s:"warn", t:"Battery clock not found", d:"The controller can't keep time through power cuts. It will use internet time when connected. Contact Quanta if this stays."});
   if(!sys.dacOk) out.push({s:"bad", t:"Output chip not responding", d:"The lights can't be dimmed. Unplug the controller for 10 seconds; if this stays, contact Quanta."});
   C.jacks.forEach((J,j) => {
     const sides = sidesOf(C, j); if(!sides.length) return;
@@ -817,17 +938,17 @@ function healthChecks(){
 function renderChrome(){
   if(!S) return;
   const perAq = tab === "now" || tab === "schedule";
-  $("hTitle").textContent = (perAq && C.setup && !C.expert && C.setup.name) || "Quanta Controller";
+  $("hTitle").textContent = (perAq && C.setup && C.setup.name) || "Quanta Controller";
   $("hId").textContent = (S.cloud && S.cloud.id) || "";
   const cn = $("cloudNote"); if(cn) cn.innerHTML = cloudNoteHtml();
-  $("hSwitch").disabled = !!(C.expert || !C.setupDone || wiz || !perAq);
+  $("hSwitch").disabled = !!(!C.setupDone || wiz || !perAq);
   $("hClock").textContent = S.time.valid ? hhmm(S.time.sec/60) + (S.time.source==="estimated" ? "?" : "") : "no clock";
   const m = $("hMode"); m.className = "chip " + S.mode;
   m.textContent = S.mode==="auto" ? "Schedule" : S.mode==="manual" ? "Manual" : "Picture";
   const hc = healthChecks(); const worst = hc.some(h=>h.s==="bad") ? "bad" : hc.some(h=>h.s==="warn") ? "warn" : "";
   $("hDot").className = worst; $("hDot").title = worst ? "Something needs attention. See Stats." : "All good";
   let b = "";
-  if(demo) b += `<div class="banner demo"><span class="grow">Demo mode. This page isn't connected to a controller, so it simulates one. On your controller's Wi-Fi, open <b>quanta.local</b>.</span><button class="btn small" data-act="demo-new">Reset to new</button></div>`;
+  if(demo) b += `<div class="banner demo"><span class="grow">Demo mode. This page isn't connected to a controller, so it simulates one. On your controller's Wi-Fi, open <b>${esc((S.sys.mdns || "quanta") + ".local")}</b>.</span><button class="btn small" data-act="demo-new">Reset to new</button></div>`;
   if(S.testBuild) b += `<div class="banner bad"><span class="grow"><b>TEST BUILD.</b> Testers can reset this controller from the cloud page. Not for customers.</span></div>`;
   if(!S.time.valid || S.time.source==="estimated") b += `<div class="banner warn"><span class="grow">${!S.time.valid ? "The controller doesn't know the time yet." : "The time was estimated after a power cut."}</span><button class="btn small" data-act="setclock">Use this phone's time</button></div>`;
   hc.filter(h=>h.s==="bad" && h.fix!=="clock").forEach(h => b += `<div class="banner bad"><span class="grow"><b>${h.t}.</b> ${h.d}</span></div>`);
@@ -854,7 +975,7 @@ function tankGlow(){
 }
 // Which output the Now page is looking at: -1 = all outputs.
 function nowOutputs(){ return C.jacks.map((J,j)=>j).filter(j => sidesOf(C,j).length); }
-const aqView = () => nowOut === -2 && !C.expert && C.aqs && C.aqs[C.sel|0];
+const aqView = () => nowOut === -2 && C.aqs && C.aqs[C.sel|0];
 function aqOutsNow(){ return C.aqs[C.sel|0].outs.filter(j => sidesOf(C,j).length); }
 function nowGroups(){
   if(aqView()){ const u = usedGroups(C).filter(g => C.groups[g].aq === (C.sel|0)); return u.length ? u : [0]; }
@@ -864,9 +985,8 @@ function nowGroups(){
 function renderNow(){
   const c = C, gl = S.groups, outs = nowOutputs();
   if(nowOut >= 0 && !outs.includes(nowOut)) nowOut = -1;
-  if(nowOut === -2 && (c.expert || !c.aqs)) nowOut = -1;
-  if(c.expert && !nowWasExpert) nowExpert = true;      // switching to Expert opens the full channel screen
-  if(!c.expert) nowExpert = false;
+  if(nowOut === -2 && !(c.aqs && c.aqs.length)) nowOut = -1;
+  if(!c.expert) nowExpert = false;                     // Expert looks like Guided; Every channel is under More
   nowWasExpert = c.expert;
   const photoOn = S.mode==="photo", vis = nowGroups();
   const shared = nowOut >= 0 && vis.some(g => C.jacks.some((J,j) => j!==nowOut && sidesOf(C,j).some(s => J.ch[s].group===g)));
@@ -877,11 +997,11 @@ function renderNow(){
     <div class="rock"></div>
     <div class="read"><div id="nRead" style="min-width:0"></div><div class="sub num" id="nNext" style="text-align:right;max-width:45%"></div></div>
   </div>
-  ${!c.expert && c.aqs ? `<div class="outchips" role="group" aria-label="Show aquarium">
-    ${c.aqs.map((a,i)=>`<button data-act="naq" data-i="${i}" class="${nowOut===-2 && (c.sel|0)===i ? "sel" : ""}">${esc(i===(c.sel|0) ? c.setup.name : a.setup.name)}</button>`).join("")}
+  ${c.aqs && c.aqs.length ? `<div class="outchips" role="group" aria-label="${c.expert ? "Show group" : "Show aquarium"}">
+    ${c.aqs.map((a,i)=>`<button data-act="naq" data-i="${i}" class="${nowOut===-2 && !nowExpert && (c.sel|0)===i ? "sel" : ""}">${esc(i===(c.sel|0) ? c.setup.name : a.setup.name)}</button>`).join("")}
     <button data-act="nmore" class="${nowMore ? "sel" : ""}" aria-expanded="${nowMore}">More ${nowMore ? "▴" : "▾"}</button>
   </div>` : ""}
-  ${c.expert || nowMore ? `<div class="outchips" role="group" aria-label="Show output">
+  ${nowMore ? `<div class="outchips" role="group" aria-label="Show output">
     ${c.expert ? `<button data-act="nexp" class="${nowExpert?"sel":""}">Every channel</button>` : ""}
     <button data-act="nout" data-j="-1" class="${nowOut===-1 && !nowExpert?"sel":""}">All</button>
     ${c.jacks.map((J,j)=>`<button data-act="nout" data-j="${j}" class="${nowOut===j && !nowExpert?"sel":""}" ${outs.includes(j)?"":"disabled"}>OUT ${j+1}</button>`).join("")}
@@ -949,15 +1069,15 @@ function setWindow(G, on, off){
 }
 function nowExpertHtml(){
   if(!D.expert) return `<section class="card"><h2>Expert control</h2>
-    <p>Expert gives you full control of the controller: every output and channel, which schedule each one follows, its colour, its intensity limit and calibration, and every point of every schedule.</p>
-    <p class="help">The setup assistant's schedules are copied over as a starting point, and your aquarium setups are kept. To go back, choose Guided in Settings.</p>
+    <p>Expert gives you full control of the controller: any light on any output, your own groups, every channel's intensity limit and calibration, and every point of every schedule.</p>
+    <p class="help">Your aquariums become groups and keep their schedules as a starting point. To go back, choose Guided in Settings.</p>
     <button class="btn primary" data-act="ex-on">Switch to Expert control</button></section>`;
   const rows = D.jacks.map((J,j) => sidesOf(D,j).map(s => { const k = J.ch[s], G = D.groups[k.group]; return `<div class="chan">
       <div class="row between"><span class="small"><b>OUT ${j+1} ${s ? "ring" : "tip"}</b> · ${esc(J.name)} · ${esc(sideName(J,s))}</span><span class="num small" id="xl${j}_${s}"></span></div>
-      <div class="stack" style="gap:4px"><span class="small muted">Schedule</span><div class="row" style="gap:6px">${G ? `<button class="swatch" data-act="x-color" data-i="${k.group}" style="background:${gcol(G.color)};width:22px;height:22px;border:0;cursor:pointer;flex:none" aria-label="Change colour"></button>` : ""}${groupSelect(`xg${j}_${s}`, k.group, false)}${G ? `<button class="btn small" data-act="x-edit" data-i="${k.group}" data-j="${j}">Edit</button>` : ""}</div></div>
+      <div class="row between" style="gap:6px"><div class="row small" style="gap:6px">${G ? `<button class="swatch" data-act="x-color" data-i="${k.group}" style="background:${gcol(G.color)};width:22px;height:22px;border:0;cursor:pointer;flex:none" aria-label="Change colour"></button>` : ""}<span>Follows <b>${esc(G ? G.name : "nothing")}</b></span></div>${G ? `<button class="btn small" data-act="x-edit" data-i="${k.group}" data-j="${j}">Edit</button>` : ""}</div>
       ${G && curveWindow(G) ? (() => { const w = curveWindow(G), len = ((w[1]-w[0]) % 1440 + 1440) % 1440; const users = groupUsers(D, k.group);
         return `<div class="grid2"><label class="f">On<input type="time" id="xon${j}_${s}" value="${hhmm(w[0])}"></label><label class="f">Off<input type="time" id="xoff${j}_${s}" value="${hhmm(w[1])}"></label></div>
-        <span class="help">${fmtDur(len*60)} a day${users.length > 1 ? `. Shared with ${users.filter(u => u !== `OUT ${j+1} ${sideName(J,s)}`).join(", ")}: they change too` : ""}. Tap Edit to shape the curve point by point.</span>`; })() : ""}
+        <span class="help">${fmtDur(len*60)} a day${users.length > 1 ? `. Shared with ${users.filter(u => u !== `OUT ${j+1} ${sideName(J,s)}`).join(", ")} in the same group: they change too` : ""}. Tap Edit to shape the curve point by point.</span>`; })() : ""}
       <label class="f" for="xt${j}_${s}"><span class="row between"><span>Intensity limit (max)</span><span class="num v" id="xtv${j}_${s}">${k.trim}%</span></span>
         <input type="range" id="xt${j}_${s}" min="0" max="100" value="${k.trim}"></label>
       <label class="f">Calibration %<input type="number" id="xc${j}_${s}" min="80" max="120" value="${k.cal}"></label>
@@ -968,10 +1088,10 @@ function nowExpertHtml(){
     ${chartLegend(D, usedGroups(D))}
     <label class="f" for="xInt"><span class="row between"><span>Master dimmer (all outputs)</span><span class="num v" id="xIntV">${D.intensity}%</span></span>
       <input type="range" id="xInt" min="10" max="100" value="${D.intensity}"></label>
-    <p class="help">Edit schedules: drag every point of every channel's curve, change times, link channels to share one curve (Grouping mode), and acclimation.</p></section>
+    <p class="help">Edit schedules: drag every point of every curve, change times, and acclimation. To group lights so they share curves, type the same group name on each output under Lights.</p></section>
   <section class="card"><div class="row between"><h2>Every channel</h2><button class="btn small" data-act="ex-go" data-t="lights">Edit outputs</button></div>
     ${rows || `<p class="help">Nothing is plugged in yet. Tap Edit outputs to choose what's on each output.</p>`}
-    <p class="help">On and Off: when the channel's schedule starts and ends (changing On moves the whole day; changing Off makes it longer or shorter). Schedule: the curve this channel follows, or a new one of its own. Tap the colour to change it. Intensity limit caps the channel; calibration matches it to a meter. Edit outputs: change what's plugged in, how many lights, names and watts.</p></section>`;
+    <p class="help">On and Off: when the channel's schedule starts and ends (changing On moves the whole day; changing Off makes it longer or shorter). Lights in the same group share their schedules. Tap the colour to change it. Intensity limit caps the channel; calibration matches it to a meter. Edit outputs: change what's plugged in, groups, names and watts.</p></section>`;
 }
 function bindNowExpert(){
   if(!D.expert) return;
@@ -979,17 +1099,7 @@ function bindNowExpert(){
   $("xInt").addEventListener("input", e => { D.intensity = Number(e.target.value); $("xIntV").textContent = D.intensity + "%";
     drawChart($("xChart"), D, {editable:false, sel:{g:-1,p:-1}, groups:usedGroups(D), dots:true}); renderChrome(); });
   D.jacks.forEach((J,j) => [0,1].forEach(s => {
-    const k = J.ch[s], g = $(`xg${j}_${s}`), t = $(`xt${j}_${s}`), cl = $(`xc${j}_${s}`);
-    if(g) g.addEventListener("change", e => { const v = e.target.value;
-      if(v === "new"){ if(D.groups.length >= MAX_GROUPS){ toast(`Up to ${MAX_GROUPS} schedules`); renderNow(); return; }
-        const src = D.groups[k.group] || D.groups[0], base = `OUT${j+1} ${sideName(J,s)}`;
-        let name = base, n = 2; while(D.groups.some(G => G.name === name)) name = `${base} ${n++}`;
-        const used = new Set(D.groups.map(G => G.color)); let col = 2; while(used.has(col) && col < NCOL - 1) col++;
-        D.groups.push({name, color: col, points: clone(src ? src.points : rampCurve(false,500,630,1260))});
-        D.photos.forEach(p => p.lvl.push(0)); k.group = D.groups.length - 1;
-        renderNow(); renderChrome(); toast(`Made "${name}", a copy to start from. Tap Edit next to it to shape it.`); return; }
-      else k.group = Number(v);
-      renderNow(); renderChrome(); });
+    const k = J.ch[s], t = $(`xt${j}_${s}`), cl = $(`xc${j}_${s}`);
     if(t) t.addEventListener("input", e => { k.trim = Number(e.target.value); $(`xtv${j}_${s}`).textContent = k.trim + "%"; renderChrome(); });
     if(cl) cl.addEventListener("change", e => { k.cal = clamp(Number(e.target.value) || 100, 80, 120); e.target.value = k.cal; renderChrome(); });
     const on = $(`xon${j}_${s}`), off = $(`xoff${j}_${s}`), G = D.groups[k.group];
@@ -998,10 +1108,10 @@ function bindNowExpert(){
     if(off && G) off.addEventListener("change", e => { const w = curveWindow(G); setWindow(G, w[0], toMin(e.target.value, w[1])); renderNow(); renderChrome(); });   // longer or shorter day
   }));
 }
-// Picture modes belong to an aquarium: show the chosen aquarium's (all of them in expert mode).
-const photoForView = (c, p) => c.expert || p.aq === undefined || p.aq === (c.sel|0);
+// Picture modes belong to an aquarium (or expert group): show the chosen one's.
+const photoForView = (c, p) => p.aq === undefined || p.aq === (c.sel|0);
 function renderPhotoEditor(){
-  const ug = (usedGroups(D).length ? usedGroups(D) : [0]).filter(g => D.expert || D.groups[g].aq === (D.sel|0));
+  const ug = (usedGroups(D).length ? usedGroups(D) : [0]).filter(g => D.groups[g].aq === undefined || D.groups[g].aq === (D.sel|0));
   return `<div class="stack">${D.photos.map((p,i)=>[p,i]).filter(([p]) => photoForView(D, p)).map(([p,i])=>`
     <div class="stack" style="padding:10px;border-radius:10px;background:var(--sunk)">
       <label class="f">Name<input type="text" maxlength="19" value="${esc(p.name)}" data-edit="photo-name" data-i="${i}" id="pn${i}"></label>
@@ -1214,8 +1324,8 @@ async function saveOutEdit(reset){
 function openExpertWarn(){
   $("overlay").innerHTML = `<div class="sheetbg" id="sheetbg"><div class="sheet" role="dialog" aria-label="Expert control">
     <h3>Switch to Expert control?</h3>
-    <p>Expert gives you full control of the controller: every output and channel, which schedule each one follows, its colour, its intensity limit and calibration, and every point of every schedule.</p>
-    <p class="help">The setup assistant's schedules are copied over as a starting point, and your aquarium setups are kept. To go back, choose Guided here in Settings.</p>
+    <p>Expert gives you full control of the controller: any light on any output, your own groups, every channel's intensity limit and calibration, and every point of every schedule.</p>
+    <p class="help">Your aquariums become groups and keep their schedules as a starting point. The pages look the same as now. To go back, choose Guided here in Settings.</p>
     <div class="row between"><button class="btn" data-act="ex-no">Cancel</button><button class="btn primary" data-act="ex-yes">Switch to Expert control</button></div>
   </div></div>`;
   $("sheetbg").addEventListener("click", e => { if(e.target.id === "sheetbg") $("overlay").innerHTML = ""; });
@@ -1226,10 +1336,11 @@ function openExpertWarn(){
 function openAqMenu(){
   aqPush(D); const free = freeOuts(D, -1), sel = D.sel|0;
   $("overlay").innerHTML = `<div class="sheetbg" id="sheetbg"><div class="sheet" role="dialog" aria-label="Your aquariums">
-    <div class="row between"><h3>Your aquariums</h3><button class="iconbtn" data-act="aq-menu-close" aria-label="Close">×</button></div>
+    <div class="row between"><h3>${D.expert ? "Your groups" : "Your aquariums"}</h3><button class="iconbtn" data-act="aq-menu-close" aria-label="Close">×</button></div>
     <div class="aqlist">${D.aqs.map((a,i) => `<button data-act="aq-pick" data-i="${i}" class="${i===sel?"sel":""}">
-      <span class="stack" style="gap:2px"><b>${esc(i===sel ? D.setup.name : a.setup.name)}</b><small class="help">${setupKind(a.setup).name} · ${a.outs.map(j=>"OUT "+(j+1)).join(", ")}</small></span>${i===sel ? `<span class="tick">✓</span>` : ""}</button>`).join("")}</div>
-    ${free.length ? `<button class="btn" data-act="aq-add">+ Set up another aquarium on ${free.map(j=>"OUT "+(j+1)).join(", ")}</button>`
+      <span class="stack" style="gap:2px"><b>${esc(i===sel ? D.setup.name : a.setup.name)}</b><small class="help">${D.expert ? exSummary(D, i) : `${setupKind(a.setup).name} · ${a.outs.map(j=>"OUT "+(j+1)).join(", ")}`}</small></span>${i===sel ? `<span class="tick">✓</span>` : ""}</button>`).join("")}</div>
+    ${D.expert ? `<button class="btn" data-act="aq-add">Make or change groups under Lights</button>`
+      : free.length ? `<button class="btn" data-act="aq-add">+ Set up another aquarium on ${free.map(j=>"OUT "+(j+1)).join(", ")}</button>`
       : `<p class="help">All four outputs are in use.</p>`}
     <p class="help">Schedule shows the aquarium you pick. Now and Lights always show every output.</p>
   </div></div>`;
@@ -1261,47 +1372,48 @@ function bindAccl(){
     renderSchedule(); renderChrome(); };
   ["aPct","aDays","aStart"].forEach(id => $(id) && $(id).addEventListener("change", acc));
 }
-// ---------- expert: one schedule per output channel, plus grouping mode to overlay several ----------
-function expertVisible(){
-  if(schedView.grouping) return [...schedView.pick].filter(g => g < D.groups.length).sort((a,b)=>a-b);
-  const j = schedView.out; if(j < 0 || !sidesOf(D, j).length) return [schedView.g];
-  return [...new Set(sidesOf(D, j).map(s => D.jacks[j].ch[s].group))].filter(g => g >= 0);
-}
+// ---------- expert: the same cards as Guided (Luca, Nov 3), with every point of every curve editable ----------
+// A card per group; tap one to open its graph. Chips pick which of its channels (Blue, White...) to edit.
+function expertVisible(){ const gs = aqGroups(D, D.sel|0); return gs.length ? gs : [0]; }
 function groupUsers(c, g){ const u = []; c.jacks.forEach((J,j) => sidesOf(c,j).forEach(s => { if(J.ch[s].group===g) u.push(`OUT ${j+1} ${sideName(J,s)}`); })); return u; }
 function renderScheduleExpert(){
-  const c = D, outs = c.jacks.map((J,j)=>j).filter(j => sidesOf(c,j).length);
-  if(!schedView.grouping){
-    if(!outs.includes(schedView.out)) schedView.out = outs.length ? outs[0] : -1;
-    const vis = expertVisible(); if(!vis.includes(schedView.g)) schedView = Object.assign(schedView, {g: vis[0] ?? 0, p:-1});
-  } else if(!schedView.pick.has(schedView.g)) schedView.g = [...schedView.pick][0] ?? 0;
-  const vis = expertVisible(), G = c.groups[schedView.g];
-  $("page").innerHTML = `
-  <section class="card">
-    <div class="row between"><h2>${schedView.grouping ? "Grouping" : "Schedule per output"}</h2>
-      <button class="btn small ${schedView.grouping?"primary":""}" data-act="grouping">${schedView.grouping ? "Done grouping" : "Grouping mode"}</button></div>
-    ${schedView.grouping ? `
-      <p class="help">Pick the schedules to show together. Tap one again to edit it.</p>
-      <div class="gchips">${c.groups.map((g,i)=>`<button data-act="gpick" data-i="${i}" class="${schedView.pick.has(i)?"sel":""} ${schedView.g===i?"edit":""}"><span class="swatch" style="background:${gcol(g.color)}"></span>${esc(g.name)}</button>`).join("")}</div>`
-    : outs.length ? `<div class="outchips">${outs.map(j=>`<button data-act="sout" data-j="${j}" class="${schedView.out===j?"sel":""}">OUT ${j+1}</button>`).join("")}</div>
-      ${vis.length > 1 ? `<div class="gchips">${vis.map(i=>`<button data-act="selg" data-i="${i}" class="${schedView.g===i?"sel":""}"><span class="swatch" style="background:${gcol(c.groups[i].color)}"></span>${esc(c.groups[i].name)}</button>`).join("")}</div>` : ""}`
-    : `<p class="help">Nothing is plugged in yet. Set up the outputs under Lights first.</p>`}
-    <div class="chartbox"><svg class="chart" id="chart" viewBox="0 0 ${CH.W} ${CH.H}" role="img" aria-label="Schedule over 24 hours"></svg></div>
-    ${chartLegend(c, vis)}
+  const c = D; aqPush(c);
+  const sel = c.sel|0, vis = expertVisible();
+  if(!vis.includes(schedView.g)) schedView = Object.assign(schedView, {g: vis[0], p:-1});
+  const head = i => `<div class="row between"><div class="stack" style="gap:0"><h3>${esc(aqNameOf(c, i))}</h3><span class="help">${exSummary(c, i)}</span></div>
+      <button class="btn small" data-act="ex-go" data-t="lights">Edit</button></div>`;
+  const card = i => {
+    if(i !== sel) return `<section class="card aq pick" data-act="aq-sel" data-i="${i}" role="button" tabindex="0" aria-label="Show ${esc(aqNameOf(c, i))}">${head(i)}</section>`;
+    const w = groupWindow(c, vis), G = c.groups[schedView.g], users = groupUsers(c, schedView.g);
+    return `<section class="card aq ${c.aqs.length > 1 ? "sel" : ""}">${head(i)}
+    <div class="inner">
+    <div class="row between wrapr" style="gap:8px"><h2>What should the lights do?</h2>
+      ${w ? `<div class="row" style="gap:6px"><input type="time" id="sOn" value="${hhmm(w[0])}" aria-label="Lights on" style="width:auto"><span class="muted">–</span><input type="time" id="sOff" value="${hhmm(w[1])}" aria-label="Lights off" style="width:auto"></div>` : ""}</div>
+    ${vis.length > 1 ? `<div class="gchips" role="group" aria-label="Channel to edit">${vis.map(g => `<button data-act="selg" data-i="${g}" class="${schedView.g===g?"sel":""}"><span class="swatch" style="background:${gcol(c.groups[g].color)}"></span>${esc(keyOf(c.groups[g]))}</button>`).join("")}</div>` : ""}
+    <div class="chartbox"><svg class="chart" id="chart" viewBox="0 0 ${CH.W} ${CH.H}" role="img" aria-label="Brightness over 24 hours"></svg></div>
+    ${chartLegend(c, vis, true)}
     <div id="ptEdit"></div>
-    <p class="help">Editing <b>${esc(G ? G.name : "")}</b>${G && groupUsers(c, schedView.g).length > 1 ? ` (followed by ${groupUsers(c, schedView.g).join(", ")})` : ""}. Drag a point to move it; tap an empty spot to add one.</p>
-    ${schedView.grouping && vis.length > 1 ? `<button class="btn" data-act="glink">Link these to one schedule</button>
-      <p class="help">Linked outputs share one curve, e.g. Helix Meso Blue bars following the Altairs' blue. Unlink them under Lights.</p>` : ""}
-    <label class="f" for="sInt"><span class="row between"><span>Master dimmer</span><span class="num v" id="sIntV">${c.intensity}%</span></span>
+    <p class="help">Editing <b>${esc(G ? keyOf(G) : "")}</b>${users.length ? ` (${users.join(", ")})` : ""}. Drag a point to move it; tap an empty spot to add one.${vis.length > 1 ? " Tap a colour above to edit another channel." : ""} Changing lights on or off moves every channel of this group together.</p>
+    </div>
+    </section>`; };
+  $("page").innerHTML = `${c.aqs.length > 1 ? `<p class="help">Switch groups by tapping the name at the top, or tap a card below.</p>` : ""}
+    ${c.aqs.map((_,i) => i).filter(i => i !== sel).concat([sel]).map(card).join("")}
+    <p class="help">To make a new group or move a light to another group, type its group name under Lights.</p>
+    <section class="card"><label class="f" for="sInt"><span class="row between"><span>Master dimmer (every group)</span><span class="num v" id="sIntV">${c.intensity}%</span></span>
       <input type="range" id="sInt" min="10" max="100" value="${c.intensity}"></label>
-  </section>
-  ${acclCard(c)}`;
+      <p class="help">Scales every schedule at once. The solid line is what the lights will do.${c.accl.on ? " The dotted line is where acclimation starts." : ""}</p></section>
+    ${acclCard(c)}`;
   drawSched();
   $("sInt").addEventListener("input", e => { D.intensity = Number(e.target.value); $("sIntV").textContent = D.intensity+"%"; drawSched(); renderChrome(); });
+  const on = $("sOn"), off = $("sOff");
+  if(on) on.addEventListener("change", e => { const w = groupWindow(D, vis), len = ((w[1]-w[0]) % 1440 + 1440) % 1440;     // move the day, keep its length
+    const m = toMin(e.target.value, w[0]); setGroupWindow(D, vis, m, (m + len) % 1440); renderSchedule(); renderChrome(); });
+  if(off) off.addEventListener("change", e => { const w = groupWindow(D, vis); setGroupWindow(D, vis, w[0], toMin(e.target.value, w[1])); renderSchedule(); renderChrome(); });   // longer or shorter day
   bindAccl(); bindChartDrag();
 }
 function drawSched(){
   if(!$("chart")) return;
-  if(expert()){ drawChart($("chart"), D, {editable:true, sel:schedView, groups:expertVisible(), labels: expertVisible().length > 2}); renderPtEdit(); }
+  if(expert()){ drawChart($("chart"), D, {editable:true, sel:schedView, groups:expertVisible()}); renderPtEdit(); }   // the chips and legend name the curves
   else drawChart($("chart"), D, {editable:false, sel:{g:-1,p:-1}, groups:guidedVisible(D)});
 }
 function renderPtEdit(){
@@ -1331,16 +1443,6 @@ function bindChartDrag(){
   svg.addEventListener("pointermove", ev => { if(!drag) return; const v = toVB(ev); drag[0] = v.m; drag[1] = v.l; moved = true; resortSel(); drawSched(); });
   const end = () => { if(drag && moved) renderChrome(); drag = null; };
   svg.addEventListener("pointerup", end); svg.addEventListener("pointercancel", end);
-}
-// Link the picked schedules: every channel on them follows the one being edited; the others go away.
-function linkPicked(){
-  const keep = schedView.g, drop = [...schedView.pick].filter(g => g !== keep);
-  D.jacks.forEach(J => J.ch.forEach(k => { if(drop.includes(k.group)) k.group = keep; }));
-  const name = D.groups[keep].name;
-  pruneGroups(D);
-  const ni = D.groups.findIndex(G => G.name === name);
-  schedView = {out:-1, grouping:true, pick:new Set([ni]), g:ni, p:-1};
-  toast(`Linked. They all follow ${name} now.`);
 }
 function toMin(v, d){ const [h,m] = String(v).split(":").map(Number); return isNaN(h) ? d : h*60 + (m||0); }
 
@@ -1420,75 +1522,79 @@ function renderLightsGuided(){
   liveLights();
 }
 function renderLights(){
-  const ex = expert();
-  if(!ex) return renderLightsGuided();
+  if(!expert()) return renderLightsGuided();
+  // Expert (Luca, Nov 3): the same page as Guided, plus a Group name on every output. Type the same group name
+  // on several outputs to group them: they then share one schedule per kind of channel (Blue, White...).
+  const c = D; aqPush(c);
+  const names = c.aqs.map((_,i) => aqNameOf(c, i));
   $("page").innerHTML = `
   <section class="card">
+    <h2>${c.aqs.length > 1 ? "Your groups" : "Your group"}</h2>
+    ${c.aqs.map((a,i) => `<div class="stack" style="gap:8px;${i ? "border-top:1px solid var(--line);padding-top:12px" : ""}">
+      <label class="f">Group name<input type="text" data-exgname="${i}" maxlength="31" value="${esc(names[i])}"></label>
+      <span class="small">${exSummary(c, i)}</span></div>`).join("")}
+    <p class="help">A group is usually one aquarium. Every light in a group follows the group's schedules, one for each kind of channel (Blue, White...). To group lights, type the same group name on each of their outputs below. A light in a group of its own keeps its own schedule.</p>
+  </section>
+  <section class="card">
     <div class="row between"><h2>Outputs</h2><span class="help">Label on the box: OUT 1–4</span></div>
-    ${D.jacks.map((J,j)=>{
+    <datalist id="exGroups">${names.map(n => `<option value="${esc(n)}"></option>`).join("")}</datalist>
+    ${c.jacks.map((J,j) => {
       const fx = J.fixture, quanta = isQuanta(fx), sides = fx==="none" ? [] : fx==="other" ? [0,1] : FIXTURES[fx].two ? [0,1] : [0];
+      const ai = J.aq, mine = ai >= 0 ? aqGroups(c, ai) : [];
       return `<div class="jack">
         <div class="row between">
-          <div class="row"><span class="plug">${j+1}</span><div class="stack" style="gap:0"><b>${esc(J.name)}</b><span class="help">${fxName(J)}${J.count>1?` × ${J.count}`:""}</span></div></div>
+          <div class="row"><span class="plug">${j+1}</span><div class="stack" style="gap:0"><b>${esc(J.name)}</b><span class="help">${fxName(J)}${J.count>1?` × ${J.count}`:""}${ai >= 0 ? ` · ${esc(names[ai])}` : ""}</span></div></div>
           <span id="js${j}"></span>
         </div>
         ${productPicker(J, j, "j")}
         ${fx==="none" ? "" : `
-        <label class="f">${fx==="other" ? "Name this equipment" : "Name"}<input type="text" id="jn${j}" maxlength="19" value="${esc(J.name)}"></label>
+        <div class="grid2"><label class="f">${fx==="other" ? "Name this equipment" : "Name"}<input type="text" id="jn${j}" maxlength="19" value="${esc(J.name)}"></label>
+          <label class="f">Group<input type="text" id="jq${j}" list="exGroups" maxlength="31" value="${esc(ai >= 0 ? names[ai] : "")}" placeholder="Group name" autocomplete="off"></label></div>
         <div class="row between wrapr">
-          <div class="row small"><span class="muted">${fx==="other" ? "Units on this cable" : "Lights on this cable"}</span>
+          <div class="row small"><span class="muted">${fx==="other" ? "Units on this Output" : "Lights on this Output"}</span>
             <div class="stepper" role="group" aria-label="Number of piggybacked lights"><button data-act="cnt" data-j="${j}" data-d="-1" aria-label="Fewer">−</button><span class="num">${J.count}</span><button data-act="cnt" data-j="${j}" data-d="1" aria-label="More">+</button></div></div>
           <button class="btn small" data-act="ident" data-j="${j}">Flash this light</button>
         </div>
         <div class="chans">
-        ${sides.map(s=>{ const k = J.ch[s]; const G = D.groups[k.group];
-          const lockedRow = quanta && !ex;
+        ${sides.map(s => { const k = J.ch[s], G = c.groups[k.group], inUse = channelInUse(c, j*2+s);
           return `<div class="chan">
             <div class="row between"><span class="small"><b>${s ? "Ring" : "Tip"}</b> · ${fx==="other" ? (s ? "second 0–10 V" : "first 0–10 V") : esc(sideName(J,s))}</span>
               <span class="small muted num">${quanta ? `${J.watts[s]} W${J.count>1?` × ${J.count}`:""}` : ""}</span></div>
-            ${lockedRow ? `<div class="row small" style="gap:6px"><span class="swatch" style="background:${gcol(G?G.color:6)}"></span>${G ? `Follows ${esc(G.name)}` : "Not used"}<span class="lock" title="Set by the product">fixed</span></div>`
-              : `<div class="chrow"><span class="small muted">${ex ? "Schedule" : "What it does"}</span>${groupSelect(`jg${j}_${s}`, k.group, !ex)}</div>`}
-            ${fx==="other" && channelInUse(D, j*2+s) ? `<label class="f">Watts each<input type="number" min="0" max="1000" id="jw${j}_${s}" value="${J.watts[s]}"></label>` : ""}
-            ${ex && channelInUse(D, j*2+s) ? `<div class="grid2">
+            ${fx==="other" ? `<div class="chrow"><span class="small muted">Follows</span><select id="jo${j}_${s}">
+                <option value="-1" ${!inUse ? "selected" : ""}>Not used (0 V)</option>
+                ${mine.map(g => `<option value="${g}" ${inUse && k.group===g ? "selected" : ""}>${esc(keyOf(c.groups[g]))}</option>`).join("")}
+                ${mine.some(g => keyOf(c.groups[g]) === sideName(J,s)) ? "" : `<option value="own">Its own schedule (${sideName(J,s)})</option>`}</select></div>`
+              : `<div class="row small" style="gap:6px"><span class="swatch" style="background:${gcol(G?G.color:6)}"></span>Follows ${esc(G ? keyOf(G) : "—")}${G && groupUsers(c, k.group).length > 1 ? `<span class="muted">, shared in ${esc(names[ai])}</span>` : ""}</div>`}
+            ${fx==="other" && inUse ? `<label class="f">Watts each<input type="number" min="0" max="1000" id="jw${j}_${s}" value="${J.watts[s]}"></label>` : ""}
+            ${inUse ? `<div class="grid2">
               <label class="f">Max %<input type="number" min="0" max="100" id="jt${j}_${s}" value="${k.trim}"></label>
               <label class="f">Calibration %<input type="number" min="80" max="120" id="jc${j}_${s}" value="${k.cal}"></label></div>` : ""}
           </div>`; }).join("")}
         ${quanta && !FIXTURES[fx].two ? `<div class="chan"><span class="small"><b>Ring</b> · not used, held at 0 V</span></div>` : ""}
         </div>
-        ${quanta ? `<p class="help">${ex ? "Channels are set by the product. Choose which schedule each one follows." : "Channels and wattage are set by the product."}</p>` : ""}
-        ${J.count>1 ? `<p class="help">Piggybacked lights share this output and always dim together.</p>` : ""}`}
+        <p class="help">${quanta ? "Channels and wattage are set by the product." : "Pick what each 0–10 V channel follows: one of its group's schedules, or one of its own."}${J.count>1 ? " Piggybacked lights share this output and always dim together." : ""}</p>`}
       </div>`; }).join("")}
-  </section>
-
-  <section class="card">
-    <h2>${ex ? "Schedules" : "Colours"}</h2>
-    ${ex ? `<p class="help">Every channel has its own schedule unless you link them (Schedule › Grouping mode). Rename them here.</p>
-      ${D.groups.map((G,i)=>{ const u = groupUsers(D, i); return `<div class="row" style="gap:8px">
-        <button class="swatch" data-act="g-color" data-i="${i}" style="background:${gcol(G.color)};width:26px;height:26px;border:0;cursor:pointer" aria-label="Change colour"></button>
-        <input type="text" id="gn${i}" maxlength="19" value="${esc(G.name)}" aria-label="Schedule name">
-        <span class="help" style="white-space:nowrap">${u.length} channel${u.length===1?"":"s"}</span></div>`; }).join("")}`
-    : `<div class="legend">${GG.map((n,i)=>`<span class="row small" style="gap:6px"><span class="swatch" style="background:${gcol(i)}"></span>${n}</span>`).join("")}</div>
-       <p class="help">Each kind of light has its own colour on the schedule. Blue and White belong to the Altairs.</p>`}
   </section>`;
+  document.querySelectorAll("[data-exgname]").forEach(el => el.addEventListener("change", e => {
+    if(!exRename(D, Number(e.target.dataset.exgname), e.target.value)) e.target.value = aqNameOf(D, Number(e.target.dataset.exgname));
+    renderLights(); renderChrome(); }));
   D.jacks.forEach((J,j) => {
-    bindProductPicker(D, j, "j", () => { renderLights(); renderChrome(); });
+    bindProductPicker(D, j, "j", () => { exRebuild(D); renderLights(); renderChrome(); });
     const n = $("jn"+j); if(n) n.addEventListener("input", e => { J.name = e.target.value.slice(0,19) || `Output ${j+1}`; renderChrome(); });
+    const q = $("jq"+j); if(q) q.addEventListener("change", e => {
+      const ok = exSetGroup(D, j, e.target.value);
+      renderLights(); renderChrome();
+      if(ok){ const ai = D.jacks[j].aq, n2 = D.aqs[ai] ? D.aqs[ai].outs.length : 1;
+        toast(n2 > 1 ? `OUT ${j+1} is in ${aqNameOf(D, ai)} with ${n2 - 1} other output${n2 > 2 ? "s" : ""}: they share its schedules` : `OUT ${j+1} is in ${aqNameOf(D, ai)} on its own`); } });
     [0,1].forEach(s => {
-      const gsel = $(`jg${j}_${s}`); if(gsel) gsel.addEventListener("change", e => {
-        const v = e.target.value;
-        if(v==="new"){ if(D.groups.length >= MAX_GROUPS){ toast(`Up to ${MAX_GROUPS} schedules`); renderLights(); return; }
-          const src = D.groups[J.ch[s].group] || D.groups[0];
-          D.groups.push({name:`OUT${j+1} ${sideName(J,s)}`, color: sideColor(J, s, D.groups.length), points: clone(src ? src.points : rampCurve(false,500,630,1260))});
-          D.photos.forEach(p => p.lvl.push(0)); J.ch[s].group = D.groups.length-1; }
-        else J.ch[s].group = Number(v);
-        if(D.expert) pruneGroups(D);
-        renderLights(); renderChrome(); });
+      const o = $(`jo${j}_${s}`); if(o) o.addEventListener("change", e => {
+        const v = e.target.value; J.ch[s].group = v === "own" ? -2 : Number(v);
+        exRebuild(D); renderLights(); renderChrome(); });
       const t = $(`jt${j}_${s}`); if(t) t.addEventListener("change", e => { J.ch[s].trim = clamp(Number(e.target.value)||0,0,100); e.target.value = J.ch[s].trim; renderChrome(); });
-      const c = $(`jc${j}_${s}`); if(c) c.addEventListener("change", e => { J.ch[s].cal = clamp(Number(e.target.value)||100,80,120); e.target.value = J.ch[s].cal; renderChrome(); });
+      const cl = $(`jc${j}_${s}`); if(cl) cl.addEventListener("change", e => { J.ch[s].cal = clamp(Number(e.target.value)||100,80,120); e.target.value = J.ch[s].cal; renderChrome(); });
       const w = $(`jw${j}_${s}`); if(w) w.addEventListener("change", e => { J.watts[s] = clamp(Number(e.target.value)||0,0,1000); renderChrome(); });
     });
   });
-  D.groups.forEach((G,i) => { const n = $("gn"+i); if(n) n.addEventListener("input", e => { G.name = e.target.value.slice(0,19) || "Schedule"; renderChrome(); }); });
   liveLights();
 }
 function liveLights(){
@@ -1591,6 +1697,9 @@ function liveStats(){
   const srcTxt = {internet:"Internet", phone:"Phone", rtc:"Battery clock", estimated:"Estimated", none:"Not set"}[t.source];
   $("kSys").innerHTML = [
     ["Time", `${t.valid ? hhmm(t.sec/60) : "—"} (${srcTxt})`],
+    ["Internet time", t.lastNtp ? `Last synced ${fmtDur(Math.max(0, t.epoch - t.lastNtp))} ago` : (s.wifi==="connected" ? "Waiting for the time server" : "Not online")],
+    ["Battery clock", !t.rtcOk ? "Not found" : t.battWarn ? "Replace CR2032 battery" : !t.rtcEpoch ? "Not set yet" : Math.abs(t.rtcDiff||0) > 2 ? `OK (off by ${t.rtcDiff} s)` : "OK"],
+    ["Online for", s.online >= 0 && s.online !== undefined ? fmtDur(s.online) : "Offline"],
     ["Energy used", `${(s.todayWh/1000).toFixed(2)} kWh today · ${(s.yesterdayWh/1000).toFixed(2)} yesterday`],
     ["Running for", fmtDur(s.uptime)],
     ["Last start", {power_on:"Power on", restart:"Restart", crash:"Recovered from a crash", watchdog:"Recovered by the watchdog", brownout:"Low power supply voltage", other:"Other"}[s.reset] || s.reset],
@@ -1648,7 +1757,7 @@ function renderSettings(){
   <section class="card">
     <h2>Interface</h2>
     <div class="seg"><button data-act="lvl-simple" class="${expert()?"":"sel"}">Guided</button><button data-act="lvl-expert" class="${expert()?"sel":""}">Expert</button></div>
-    <p class="help">${expert() ? "Expert: you build every output's schedule yourself (start, end, points per channel), group outputs together, and set limits and calibration. Tank type, spectrum and presets are hidden."
+    <p class="help">${expert() ? "Expert: the same pages as Guided, but you shape every curve point by point, put any light on any output, name your own groups (Lights › Group) and set limits and calibration. Tank type, spectrum and presets are hidden."
       : "Guided: pick your tank type, spectrum and lights-off time and the controller draws the schedule. Switch to Expert to build every output's schedule yourself."}</p>
     <button class="btn" data-act="wizard">Run the setup assistant again</button>
   </section>
@@ -1660,7 +1769,7 @@ function renderSettings(){
 
   <section class="card">
     <h2>Wi-Fi</h2>
-    <p class="small">${s.wifi==="connected" ? `Connected to <b>${esc(s.ssid)}</b>. Open <b>quanta.local</b> or <b class="num">${s.ip}</b>.` : s.ap ? `The controller's own hotspot <b>${esc(s.apName)}</b> is on.` : "Not connected."}</p>
+    <p class="small">${s.wifi==="connected" ? `Connected to <b>${esc(s.ssid)}</b>. Open <b>${esc((s.mdns || "quanta") + ".local")}</b> or <b class="num">${s.ip}</b>.` : s.ap ? `The controller's own hotspot <b>${esc(s.apName)}</b> is on.` : "Not connected."}</p>
     <div class="grid2"><label class="f">Network name<input type="text" id="wS" autocomplete="off" value="${esc(s.ssid||"")}"></label><label class="f">Password<input type="password" id="wP"></label></div>
     <div class="row wrapr"><button class="btn" data-act="wifi">Join network</button>${demo ? "" : `<a class="btn" href="/wifi">Choose from nearby networks</a>`}</div>
     <p class="help">The controller restarts to join. The lights stay exactly as they are during the restart.</p>
@@ -1906,8 +2015,7 @@ function renderWizard(){
 function wizBuild(){
   const w = wiz, c = w.c;
   if(w.ex){
-    c.jacks.forEach((J,j) => { if(J.fixture!=="other") expertGroupsFor(c, j); });
-    pruneGroups(c);
+    exRebuild(c);
   } else {
     c.expert = false; c.setup = clone(w.s);
     if(!spectraFor(w.s.kind).includes(c.spectrum) && w.s.kind !== "supp") c.spectrum = 2;
@@ -2003,9 +2111,10 @@ document.addEventListener("click", async ev => {
     case "naq": nowOut = -2; selectAq(i); render(); break;
     case "nexp": nowExpert = true; nowOut = -1; renderNow(); break;
     case "nmore": nowMore = !nowMore; if(!nowMore && nowOut !== -2) nowOut = -2; renderNow(); break;
-    case "ex-on": toExpert(D); schedView = {out:0, grouping:false, pick:new Set(), g:0, p:-1}; await saveConfig(); toast("Expert control is on. Every channel now has its own schedule."); break;
+    case "ex-on": toExpert(D); schedView = {out:0, grouping:false, pick:new Set(), g:0, p:-1}; await saveConfig(); toast("Expert control is on. Your aquariums are now groups you can edit point by point."); break;
     case "ex-go": tab = b.dataset.t; render(); window.scrollTo(0,0); break;
-    case "x-edit": schedView = {out:j, grouping:false, pick:new Set(), g:i, p:-1}; tab = "schedule"; render(); window.scrollTo(0,0); toast(`Editing ${D.groups[i].name}: drag a point, or tap to add one`); break;
+    case "x-edit": if(D.groups[i] && D.groups[i].aq >= 0 && D.groups[i].aq !== (D.sel|0)) selectAq(D.groups[i].aq);
+      schedView = {out:j, grouping:false, pick:new Set(), g:i, p:-1}; tab = "schedule"; render(); window.scrollTo(0,0); toast(`Editing ${D.groups[i].name}: drag a point, or tap to add one`); break;
     case "x-color": { const used = new Set(D.groups.map(G=>G.color)); let n = D.groups[i].color;
       for(let k=0;k<NCOL;k++){ n = n < 2 ? 2 : (n+1) % NCOL; if(n < 2) n = 2; if(!used.has(n) || k===NCOL-1) break; }
       D.groups[i].color = n; renderNow(); renderChrome(); break; }
@@ -2015,23 +2124,13 @@ document.addEventListener("click", async ev => {
     case "photo-min": D.photos[i].minutes = Number(b.dataset.m); render(); break;
     case "photo-del": D.photos.splice(i,1); render(); break;
     case "photo-add": D.photos.push(Object.assign({name:"Picture " + (D.photos.length+1), minutes:30,
-        lvl:S.groups.map((v,g) => D.expert || !D.groups[g] || D.groups[g].aq === (D.sel|0) ? v : null)}, D.expert ? {} : {aq:D.sel|0})); render(); break;
+        lvl:S.groups.map((v,g) => !D.groups[g] || D.groups[g].aq === undefined || D.groups[g].aq === (D.sel|0) ? v : null)}, D.aqs && D.aqs.length ? {aq:D.sel|0} : {})); render(); break;
     case "setclock": control({time:Math.floor(Date.now()/1000)}, "Clock set from this phone"); break;
     case "tank": D.tank = i; D.intensity = TANKS[i].intensity; D.intenIn = Math.max(10, D.intensity - 15); D.accl.startPct = acclStartFor(D.intensity);
       if(i===2 && SPECTRA[D.spectrum].noSps){ D.spectrum = 3; toast("Ultra Blue isn't for SPS corals, so the spectrum is now Meso Fringe Reef."); }
       guidedGroups(D); renderSchedule(); renderChrome(); break;
     case "spectrum": D.spectrum = i; guidedGroups(D); renderSchedule(); renderChrome(); break;
     case "selg": schedView.g = i; schedView.p = -1; renderSchedule(); break;
-    case "sout": schedView.out = j; schedView.p = -1; renderSchedule(); break;
-    case "grouping": schedView.grouping = !schedView.grouping; schedView.p = -1;
-      if(schedView.grouping) schedView.pick = new Set(expertVisible().length ? expertVisible() : [0]);
-      renderSchedule(); break;
-    case "gpick": { const P = schedView.pick;
-      if(P.has(i) && schedView.g !== i){ schedView.g = i; }
-      else if(P.has(i)){ if(P.size > 1){ P.delete(i); schedView.g = [...P][0]; } }
-      else { P.add(i); schedView.g = i; }
-      schedView.p = -1; renderSchedule(); break; }
-    case "glink": linkPicked(); renderSchedule(); renderChrome(); break;
     case "cmp": compareWith = b.dataset.i; renderStats(); break;
     case "pt-del": { const G = D.groups[schedView.g]; if(G.points.length>1){ G.points.splice(schedView.p,1); schedView.p=-1; drawSched(); renderChrome(); } break; }
     case "cnt": { const J = D.jacks[j]; J.count = clamp(J.count + Number(b.dataset.d), 1, 8); renderLights(); renderChrome(); break; }
@@ -2041,8 +2140,8 @@ document.addEventListener("click", async ev => {
       D.groups[i].color = n; renderLights(); renderChrome(); break; }
     case "lvl-simple": if(D.expert){ toGuided(D); schedView = {out:0, grouping:false, pick:new Set(), g:0, p:-1}; toast("Guided: the schedule is drawn from your setup again. Tap Save to keep it, or run the setup assistant to change it."); } render(); break;
     case "lvl-expert": if(!D.expert) openExpertWarn(); break;
-    case "ex-yes": $("overlay").innerHTML = ""; toExpert(D); schedView = {out:0, grouping:false, pick:new Set(), g:0, p:-1}; nowOut = -1; nowMore = false;
-      toast("Expert: every output now has its own schedule. Build them under Schedule, then Save."); render(); break;
+    case "ex-yes": $("overlay").innerHTML = ""; toExpert(D); schedView = {out:0, grouping:false, pick:new Set(), g:0, p:-1}; nowOut = -2; nowMore = false;
+      toast("Expert: your aquariums are now groups. Shape their curves under Schedule, group lights under Lights, then Save."); render(); break;
     case "ex-no": $("overlay").innerHTML = ""; break;
     case "wizard": openWizard(); break;
     case "aq-sel": selectAq(i); render(); break;
@@ -2064,11 +2163,11 @@ document.addEventListener("click", async ev => {
       if(planOuts(st).length > a.outs.length) st.par = false;     // more lights here never takes another output
       applyGuided(D); render(); break; }
     case "aq-edit": ev.stopPropagation(); openWizard(i); break;
-    case "aq-add": $("overlay").innerHTML = ""; if(D.expert){ toast("Switch to Guided in Settings to use the setup assistant"); break; } openWizard(-1); break;
+    case "aq-add": $("overlay").innerHTML = ""; if(D.expert){ tab = "lights"; render(); window.scrollTo(0,0); toast("Type a new group name on an output to make a group"); break; } openWizard(-1); break;
     case "wz-remove": { const n = wiz.c.aqs[wiz.aq].setup.name; aqPush(D); D.aqs.splice(wiz.aq, 1); aqPull(D, 0); applyGuided(D); D.photos = guidedPhotos(D);
       wiz = null; renderWizard(); render(); toast(`${n} removed. Tap Save to keep it.`); break; }
     case "wifi": { const ssid = $("wS").value.trim(); if(!ssid){ toast("Enter your Wi-Fi network name"); break; }
-      try { await post("/api/wifi", {ssid, pass:$("wP").value}); toast(demo ? "Demo: nothing to join" : `Joining ${ssid}. Reconnect your phone to that network, then open quanta.local.`); } catch(e){ toast(e.message); } break; }
+      try { await post("/api/wifi", {ssid, pass:$("wP").value}); toast(demo ? "Demo: nothing to join" : `Joining ${ssid}. Reconnect your phone to that network, then open ${(S.sys.mdns || "quanta") + ".local"}.`); } catch(e){ toast(e.message); } break; }
     case "ota-check": case "ota-install": {
       const url = $("otaUrl") ? $("otaUrl").value.trim() : "";
       if(!url){ toast("Enter the update server address first"); break; }
@@ -2120,10 +2219,10 @@ document.querySelectorAll("nav.tabs button").forEach(b => b.addEventListener("cl
 
 const HELP = {
   now:`<p>Tap a light in the tank picture (or OUT 1–4 below it) to see that output's channels. <b>All</b> shows every output.</p><p><b>Schedule</b> runs your daily light curve. <b>Manual</b> lets you set the lights by hand for 30 minutes or 1 hour, then goes back to the schedule by itself, so nobody forgets and leaves the corals under the wrong light. <b>Picture</b> applies one of your saved photo settings the same way.</p><p>Moving any slider switches to Manual.</p>`,
-  schedule:`<p><b>Guided:</b> each aquarium has its own card. Tap one to see its schedule; the name at the top of the page follows it. Set when the lights go off and how bright they run. To change the tank type, spectrum or lights, tap <b>Edit</b>: it reopens the setup assistant for that aquarium.</p><p>The solid line is what the lights will do. When <b>Acclimation mode</b> is on, the dotted line shows where it starts: 20 points lower, climbing to your intensity over 30 days.</p><p><b>Expert:</b> every output channel has its own schedule. Drag the points, tap empty space to add one, or tap a point and choose Remove. <b>Grouping mode</b> shows several schedules on one chart, and can link them so they share one curve.</p>`,
-  lights:`<p><b>Guided:</b> the setup assistant fills this in. Each output belongs to an aquarium (its Aquarium Name). Rename outputs and aquariums here; tap <b>Change setup</b> to change the lights, or <b>Guided Set Up to use outputs</b> on a free output to add another aquarium.</p><p><b>Expert:</b> tell the controller what's plugged into each of the four outputs: Altair 210 or 100, Atlas, Helix (spectrum, then length), or 3rd-party equipment. The channels and wattage of Quanta lights fill in by themselves.</p><p>Altairs have a blue channel (tip) and a white channel (ring). Atlas and Helix lights use the tip only; the ring is held at 0 V.</p><p>For <b>3rd-party equipment</b>, name it and choose what the tip and ring do.</p><p>Tap <b>Flash this light</b> to find out which light is on which output.</p>`,
+  schedule:`<p><b>Guided:</b> each aquarium has its own card. Tap one to see its schedule; the name at the top of the page follows it. Set when the lights go off and how bright they run. To change the tank type, spectrum or lights, tap <b>Edit</b>: it reopens the setup assistant for that aquarium.</p><p>The solid line is what the lights will do. When <b>Acclimation mode</b> is on, the dotted line shows where it starts: 20 points lower, climbing to your intensity over 30 days.</p><p><b>Expert:</b> the same cards, one per group. Tap a group to open its graph; the coloured chips pick which channel (Blue, White...) to edit. Drag the points, tap empty space to add one, or tap a point and choose Remove. Lights on and off move every channel of the group together. To group lights, type the same group name on their outputs under Lights.</p>`,
+  lights:`<p><b>Guided:</b> the setup assistant fills this in. Each output belongs to an aquarium (its Aquarium Name). Rename outputs and aquariums here; tap <b>Change setup</b> to change the lights, or <b>Guided Set Up to use outputs</b> on a free output to add another aquarium.</p><p><b>Expert:</b> tell the controller what's plugged into each of the four outputs: Altair 210 or 100, Atlas, Helix (spectrum, then length), or 3rd-party equipment. The channels and wattage of Quanta lights fill in by themselves.</p><p><b>Groups</b> (Expert): type a <b>Group</b> name on each output. Outputs with the same group name are grouped, usually one aquarium: they share one schedule for each kind of channel (Blue, White...), and they get their own card on Schedule and their own button on Now. Rename a group under <b>Your groups</b>. A light in a group of its own keeps its own schedule.</p><p>Altairs have a blue channel (tip) and a white channel (ring). Atlas and Helix lights use the tip only; the ring is held at 0 V.</p><p>For <b>3rd-party equipment</b>, name it and choose what the tip and ring follow: one of its group's schedules, its own, or nothing.</p><p>Tap <b>Flash this light</b> to find out which light is on which output.</p>`,
   stats:`<p><b>Savings calculator</b> compares your lights with a $1,000 LED, Metal Halide or T-5 giving the same amount of light, using your schedule and electricity price.</p><p><b>Health check</b> looks at the clock, every cable, power cuts, temperature and Wi-Fi, and says what to do if something's off. If an output says <b>No light detected</b>, push the 3.5 mm plug fully in at both ends. A <b>cable short</b> on the ring usually means a mono cable; use a stereo one.</p>`,
-  settings:`<p><b>Guided</b> draws the schedule for you from tank type and spectrum. <b>Expert</b> lets you build every output's schedule yourself.</p><p>The controller runs the lights by itself. Wi-Fi and this page are only for changing settings; if Wi-Fi goes down, the lights carry on.</p><p>Hold the button on the controller for 5 seconds to turn on its setup hotspot. Hold 20 seconds to forget the Wi-Fi network.</p>`,
+  settings:`<p><b>Guided</b> draws the schedule for you from tank type and spectrum. <b>Expert</b> keeps the same pages, and lets you shape every curve yourself and make your own groups of lights.</p><p>The controller runs the lights by itself. Wi-Fi and this page are only for changing settings; if Wi-Fi goes down, the lights carry on.</p><p>Hold the button on the controller for 5 seconds to turn on its setup hotspot. Hold 20 seconds to forget the Wi-Fi network.</p>`,
 };
 $("helpBtn").addEventListener("click", () => {
   if(demo) window.scrollTo(0,0);
@@ -2188,4 +2287,4 @@ async function poll(){
 })();
 </script>
 
-</body></html></body></html>
+</body></html>

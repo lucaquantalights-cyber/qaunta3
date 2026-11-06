@@ -59,6 +59,9 @@ String OtaManager::absoluteUrlFromManifestUrl(const String& manifestUrl, const S
 bool OtaManager::insideQuantaFolder(const String& url) {
     String u = url;
     u.toLowerCase();
+    if (_deviceId.length())                        // per-device: only this controller's own folder
+        return u.indexOf("/" OTA_FOLDER "/device/" + _deviceId + "/") >= 0 ||
+               u.indexOf("/" OTA_FOLDER "%2fdevice%2f" + _deviceId + "%2f") >= 0;
     return u.indexOf("/" OTA_FOLDER "/") >= 0 || u.indexOf("/" OTA_FOLDER "%2f") >= 0;
 }
 
@@ -106,6 +109,11 @@ OtaManager::Result OtaManager::check(const String& url, bool doInstall, uint32_t
     _status.notes = doc["notes"] | "";
 
     if (product != OTA_PRODUCT) return finish(BLOCKED, "Blocked: that update is not for this product (" + product + ").");
+    String forId = doc["deviceId"] | "";
+    forId.toLowerCase();
+    if (forId != _deviceId)
+        return finish(BLOCKED, _deviceId.length() ? "Blocked: that update is for " + (forId.length() ? forId : String("all controllers")) + ", not " + _deviceId + "."
+                                                  : "Blocked: that update is for controller " + forId + ".");
     if (version.length() == 0) return finish(BLOCKED, "Blocked: the update has no version number.");
     if (fw.length() == 0) return finish(BLOCKED, "Blocked: the update has no firmware file.");
     String firmwareUrl = absoluteUrlFromManifestUrl(manifestUrl, fw);

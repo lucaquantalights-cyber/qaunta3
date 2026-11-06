@@ -467,8 +467,10 @@ inline int sanitizeAqs(Config &c) {
       if (j >= JACKS || (used & (1 << j))) { fixes++; continue; }
       a.out[k] = j; a.adj[k] = a.adj[x]; memcpy(a.outName[k], a.outName[x], NAME_LEN); used |= 1 << j; k++;
     }
-    for (uint8_t j = 0; j < JACKS && k < need; j++) if (!(used & (1 << j))) { a.out[k] = j; a.adj[k] = {}; a.outName[k][0] = 0; used |= 1 << j; k++; fixes++; }
-    if (fix(k > need)) { for (uint8_t x = need; x < k; x++) used &= ~(1 << a.out[x]); k = need; }
+    if (!c.expert) {        // guided: an aquarium uses exactly the outputs its setup needs. Expert: the user's groups, any size.
+      for (uint8_t j = 0; j < JACKS && k < need; j++) if (!(used & (1 << j))) { a.out[k] = j; a.adj[k] = {}; a.outName[k][0] = 0; used |= 1 << j; k++; fixes++; }
+      if (fix(k > need)) { for (uint8_t x = need; x < k; x++) used &= ~(1 << a.out[x]); k = need; }
+    }
     a.nOut = k;
     for (uint8_t x = 0; x < JACKS; x++) {
       a.outName[x][NAME_LEN - 1] = 0;
@@ -707,6 +709,8 @@ inline int sanitize(Config &c) {
     if (c.nAq >= 1 && c.nAq <= MAX_AQ && c.sel < c.nAq) aqPush(c);   // the pages' edits go into the aquarium they're on
   }
   fixes += sanitizeAqs(c);
+  for (uint8_t g = 0; g < MAX_GROUPS; g++) if (fix(c.group[g].aq != NO_AQ && c.group[g].aq >= c.nAq)) c.group[g].aq = NO_AQ;
+  for (uint8_t p = 0; p < MAX_PHOTO; p++) if (fix(c.photo[p].aq != NO_AQ && c.photo[p].aq >= c.nAq)) c.photo[p].aq = NO_AQ;
   if (!c.expert) { aqPull(c, c.sel); applyGuided(c); }
   for (uint8_t i = 0; i < CHANNELS; i++) {
     if (fix(c.ch[i].group >= (int8_t)c.nGroups || c.ch[i].group < -1)) c.ch[i].group = -1;

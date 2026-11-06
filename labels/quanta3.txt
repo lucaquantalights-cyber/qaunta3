@@ -1,0 +1,9 @@
+Quanta Controller
+
+Device ID: quanta3
+Serial Label: QNT-00003
+Claim Code: WTT8-ZNT7
+MAC Address: EC:C9:FF:ED:9E:CC
+Chip ID: CC9EEDFFC9EC
+Setup Wi-Fi: Quanta-CC9E
+Local page: http://quanta3.local

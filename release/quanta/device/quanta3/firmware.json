@@ -1,0 +1,10 @@
+{
+  "product": "quanta-altair",
+  "deviceId": "quanta3",
+  "version": "P-0.0.15",
+  "firmware": "firmware.bin",
+  "md5": "a56407d9c0ed7aed495854541bf79f01",
+  "size": 1190896,
+  "notes": "Expert",
+  "builtAt": "2026-11-03T20:47:48-06:00"
+}

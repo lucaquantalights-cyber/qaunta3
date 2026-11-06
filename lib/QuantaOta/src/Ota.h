@@ -7,7 +7,9 @@
 //   { "product": "quanta-altair", "version": "2.0.1", "firmware": "firmware.bin",
 //     "md5": "<optional 32-char hex of the .bin>", "notes": "<optional>" }
 //
-// Install happens only if: product matches, the firmware URL is inside the quanta/ folder,
+// Per device (P-0.0.14): <server>/quanta/device/<id>/firmware.json with "deviceId": "<id>".
+//
+// Install happens only if: product matches, deviceId matches, the firmware URL is inside the quanta/ folder,
 // the version is newer than the running one, and (when given) the MD5 matches.
 #ifndef QUANTA_OTA_H
 #define QUANTA_OTA_H
@@ -42,6 +44,10 @@ public:
 
     explicit OtaManager(const char* runningVersion);
 
+    // Per-device updates: with an ID set (e.g. "quanta3") the manifest's "deviceId" must match it and
+    // the firmware file must be inside .../quanta/device/<id>/. Empty = shared quanta/ folder (unprovisioned).
+    void setDeviceId(const String& id) { _deviceId = id; _deviceId.toLowerCase(); }
+
     // Reads the manifest. If install is true and a newer version passes the checks,
     // downloads it, verifies it and restarts (does not return on success).
     Result check(const String& url, bool install, uint32_t nowEpoch);
@@ -53,6 +59,7 @@ public:
 
 private:
     const char* _running;
+    String _deviceId;
     Status _status;
     TickFn _tick = nullptr;
     void tick() { if (_tick) _tick(); }

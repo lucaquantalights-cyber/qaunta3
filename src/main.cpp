@@ -11,6 +11,9 @@
 //     previous copy. Anything loaded is validated and clamped before use.
 //  5. New firmware must run cleanly for a minute or the box rolls back to the old version.
 #include <Arduino.h>
+#if __has_include(<esp_mac.h>)
+#include <esp_mac.h>                              // esp_read_mac()
+#endif
 #include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -38,7 +41,7 @@
 
 using namespace qc;
 
-#define FW_VERSION "P-0.0.4"
+#define FW_VERSION "P-0.0.17"
 
 // ======================================================================= state
 static Config   cfg;
@@ -73,6 +76,11 @@ constexpr uint32_t MON_ZERO_SETTLE_MS = 2500;
 enum TimeSrc : uint8_t { TS_NONE = 0, TS_RTC, TS_NTP, TS_PHONE, TS_ESTIMATED };
 static uint8_t  timeSrc = TS_NONE;
 static uint32_t lastTimeSync = 0;              // epoch of last NTP/phone sync
+static uint32_t lastNtp = 0;                   // epoch of last internet (NTP) time
+static volatile uint32_t ntpPending = 0;       // set by the SNTP task, handled in loop() (I2C stays on one task)
+static uint32_t onlineSinceMs = 0;             // millis() when home Wi-Fi last connected, 0 = offline
+static bool     battWarn = false;              // battery clock lost time while unplugged: replace the CR2032
+static const uint8_t dacMap[8] = DAC_MAP;      // OUTn -> DAC chip channel (config.h)
 
 static int8_t   identifyJack = -1;
 static uint32_t identifyUntilMs = 0;
@@ -92,6 +100,7 @@ static DNSServer dns;
 static bool apOn = false;
 static uint32_t apUntilMs = 0;                 // 0 = keep on while needed
 static String staSsid, staPass;
+static String mdnsName;                 // unique home-network name derived from the provisioned controller ID
 static bool provActive = false;               // Wi-Fi setup page is connecting
 static uint32_t provStartMs = 0;
 
@@ -143,7 +152,8 @@ static void configToJson(JsonDocument &d) {
     JsonObject o = ga.add<JsonObject>();
     const Group &G = cfg.group[g];
     o["name"] = G.name; o["color"] = G.color;
-    if (G.aq != NO_AQ && !cfg.expert) { o["aq"] = G.aq; o["role"] = G.role ? "white" : "blue"; if (G.inten) o["inten"] = G.inten; }
+    // Expert groups are aquariums too (Luca, Nov 3), so the aquarium link is kept in both modes.
+    if (G.aq != NO_AQ) { o["aq"] = G.aq; o["role"] = G.role ? "white" : "blue"; if (G.inten && !cfg.expert) o["inten"] = G.inten; }
     JsonArray pa = o["points"].to<JsonArray>();
     for (uint8_t i = 0; i < cfg.group[g].n; i++) {
       JsonArray p = pa.add<JsonArray>(); p.add(cfg.group[g].p[i].min); p.add(cfg.group[g].p[i].lvl);
@@ -155,7 +165,7 @@ static void configToJson(JsonDocument &d) {
     o["fixture"] = fixtureId(cfg.jack[j].fixture); o["count"] = cfg.jack[j].count; o["name"] = cfg.jack[j].name;
     JsonArray w = o["watts"].to<JsonArray>(); w.add(cfg.jack[j].watts[0]); w.add(cfg.jack[j].watts[1]);
     o["len"] = cfg.jack[j].len;
-    if (!cfg.expert) for (uint8_t i = 0; i < cfg.nAq; i++) for (uint8_t k = 0; k < cfg.aq[i].nOut; k++) if (cfg.aq[i].out[k] == j) o["aq"] = i;
+    for (uint8_t i = 0; i < cfg.nAq; i++) for (uint8_t k = 0; k < cfg.aq[i].nOut; k++) if (cfg.aq[i].out[k] == j) o["aq"] = i;
     JsonArray ca = o["ch"].to<JsonArray>();
     for (uint8_t s = 0; s < 2; s++) {
       const Channel &c = cfg.ch[j * 2 + s];
@@ -166,7 +176,7 @@ static void configToJson(JsonDocument &d) {
   for (uint8_t p = 0; p < cfg.nPhoto; p++) {
     JsonObject o = pa.add<JsonObject>();
     o["name"] = cfg.photo[p].name; o["minutes"] = cfg.photo[p].minutes;
-    if (cfg.photo[p].aq != NO_AQ && !cfg.expert) o["aq"] = cfg.photo[p].aq;
+    if (cfg.photo[p].aq != NO_AQ) o["aq"] = cfg.photo[p].aq;     // each group's own picture modes (expert too)
     JsonArray l = o["lvl"].to<JsonArray>();
     for (uint8_t g = 0; g < cfg.nGroups; g++) { if (cfg.photo[p].lvl[g] == FOLLOW) l.add(nullptr); else l.add(cfg.photo[p].lvl[g]); }
   }
@@ -399,8 +409,8 @@ static void writeOutputs() {
     }
     return;
   }
-  uint16_t a[4] = {codeOut[0], codeOut[1], codeOut[2], codeOut[3]};
-  uint16_t b[4] = {codeOut[4], codeOut[5], codeOut[6], codeOut[7]};
+  uint16_t a[4] = {0}, b[4] = {0};
+  for (uint8_t c = 0; c < 8; c++) { uint8_t k = dacMap[c] & 7; (k < 4 ? a[k] : b[k - 4]) = codeOut[c]; }
   if (dacA.ok) dacA.write(a);
   if (dacB.ok) dacB.write(b);
 }
@@ -539,6 +549,34 @@ static void buttonTick() {
 }
 
 // ======================================================================= Wi-Fi
+static String controllerMdnsName() {
+  // Use the provisioned Quanta device ID so multiple controllers can coexist:
+  // quanta3 -> quanta3.local, quanta4 -> quanta4.local, etc.
+  String id = prefs.getString("cId", "");
+  id.trim(); id.toLowerCase();
+  bool valid = id.length() > 0 && id.length() <= 31 && id[0] != '-' && id[id.length() - 1] != '-';
+  for (size_t i = 0; valid && i < id.length(); ++i) {
+    const char c = id[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) valid = false;
+  }
+  if (valid) return id;
+
+  // A not-yet-provisioned board still gets a unique hostname instead of sharing one generic hostname.
+  char fallback[24];
+  snprintf(fallback, sizeof(fallback), "%s-%04X", MDNS_FALLBACK_PREFIX,
+           (uint16_t)(ESP.getEfuseMac() >> 32));
+  return String(fallback);
+}
+
+// Per-device OTA: a provisioned controller (cId "quanta3") only updates from its own folder,
+// <OTA_DEFAULT_URL>device/quanta3/, which build_device.py fills. Unprovisioned boards use the shared folder.
+static String otaDeviceId() {
+  String id = prefs.getString("cId", "");
+  id.trim(); id.toLowerCase();
+  return id.length() && controllerMdnsName() == id ? id : String("");   // only a valid provisioned ID
+}
+static String otaDeviceUrl(const String &id) { return String(OTA_DEFAULT_URL) + "device/" + id + "/"; }
+
 static String apName() {
   char n[32]; snprintf(n, sizeof(n), "Quanta-%04X", (uint16_t)(ESP.getEfuseMac() >> 32)); return n;
 }
@@ -558,7 +596,7 @@ static void startAp(uint32_t minutes) {
 static void stopAp() {
   if (!apOn) return;
   dns.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); apOn = false;
-  MDNS.end(); MDNS.begin(MDNS_NAME); MDNS.addService("http", "tcp", 80);
+  MDNS.end(); MDNS.begin(mdnsName.c_str()); MDNS.addService("http", "tcp", 80);
   Serial.println("Hotspot OFF (home Wi-Fi is working)");
 }
 
@@ -567,36 +605,66 @@ static void wifiTick() {
   static bool wasConnected = false;
   bool conn = staSsid.length() && WiFi.status() == WL_CONNECTED;
   if (conn && !wasConnected) {
+    onlineSinceMs = millis(); if (!onlineSinceMs) onlineSinceMs = 1;
     logEvent(EV_WIFI, 1, WiFi.RSSI() & 0xFF);
-    MDNS.end();                                    // re-announce quanta.local on the home network
-    if (MDNS.begin(MDNS_NAME)) MDNS.addService("http", "tcp", 80);
+    MDNS.end();                                    // re-announce this controller's unique hostname on the home network
+    if (MDNS.begin(mdnsName.c_str())) MDNS.addService("http", "tcp", 80);
     if (provActive) {                              // just set up from the hotspot: keep it up so the address can be written down
       provActive = false;
       if (apOn) apUntilMs = millis() + PROV_HOLD_S * 1000UL;
     }
     Serial.printf("Home Wi-Fi connected: \"%s\"  page at http://%s  or http://%s.local\n",
-                  staSsid.c_str(), WiFi.localIP().toString().c_str(), MDNS_NAME);
+                  staSsid.c_str(), WiFi.localIP().toString().c_str(), mdnsName.c_str());
   }
-  if (!conn && wasConnected) Serial.println("Home Wi-Fi lost, retrying...");
+  if (!conn && wasConnected) { onlineSinceMs = 0; Serial.println("Home Wi-Fi lost, retrying..."); }
   wasConnected = conn;
   if (!staSsid.length()) { if (!apOn) startAp(0); return; }  // never set up: hotspot stays on
+  // The ESP32 has one radio. While it hunts for a saved network it can't reach, it hops channels and
+  // phones on the hotspot keep dropping. So with the hotspot on, the hunt pauses: one try every 3 min,
+  // and never while a phone is on the hotspot. A setup from the Wi-Fi page gets PROV_FAIL_S to connect first.
+  static bool huntPaused = false;
+  static uint32_t lastTry = 0;
+  bool joining = provActive && millis() - provStartMs < PROV_FAIL_S * 1000UL;
+  if (joining) huntPaused = false;                           // a new network was just entered: let it connect
   if (conn) {
     lostSince = 0;
+    if (huntPaused) { huntPaused = false; WiFi.setAutoReconnect(true); }
     if (apOn && apUntilMs == 0) stopAp();                     // home Wi-Fi works: close the automatic hotspot
   } else {
     if (!lostSince) lostSince = millis();
     if (!apOn && millis() - lostSince > 120000) startAp(0);   // can't reach home Wi-Fi for 2 min: open hotspot
+    if (apOn && !joining) {
+      if (!huntPaused) {
+        huntPaused = true; lastTry = millis();
+        WiFi.setAutoReconnect(false); WiFi.disconnect(false, false);
+        Serial.printf("Hotspot on: pausing the search for \"%s\" so phones stay connected\n", staSsid.c_str());
+      } else if (WiFi.softAPgetStationNum() == 0 && millis() - lastTry > 180000) {
+        lastTry = millis();
+        Serial.printf("No phone on the hotspot: trying \"%s\" again\n", staSsid.c_str());
+        WiFi.begin(staSsid.c_str(), staPass.c_str());
+      }
+    }
   }
   if (apOn && apUntilMs && (int32_t)(millis() - apUntilMs) > 0) { apUntilMs = 0; if (conn) stopAp(); }
 }
 
+// Runs in the SNTP task: only note it. ntpTick() (main loop) talks to the clock chip, so the I2C bus is
+// never used by two tasks at once.
 static void onNtp(struct timeval *tv) {
   uint32_t e = tv->tv_sec;
-  if (e < 1700000000) return;
+  if (e >= 1700000000) ntpPending = e;
+}
+
+static void ntpTick() {
+  uint32_t e = ntpPending;
+  if (!e) return;
+  ntpPending = 0;
   bool first = timeSrc != TS_NTP;
   uint32_t r = rtc.read();
-  if (!r || (r > e ? r - e : e - r) > 2) rtc.write(e);        // keep the battery clock right
-  timeSrc = TS_NTP; lastTimeSync = e;
+  if (!r || (r > e ? r - e : e - r) > 2) {                    // keep the battery clock right
+    if (rtc.write(e) && !prefs.getBool("rtcSet", false)) prefs.putBool("rtcSet", true);
+  }
+  timeSrc = TS_NTP; lastTimeSync = e; lastNtp = e;
   if (first) logEvent(EV_TIME, TS_NTP);
 }
 
@@ -780,6 +848,9 @@ static void apiState() {
   JsonObject t = d["time"].to<JsonObject>();
   t["epoch"] = nowEpoch(); t["valid"] = timeValid(); t["source"] = timeSrcId(); t["sec"] = secOfDay();
   t["tz"] = cfg.tz; t["lastSync"] = lastTimeSync; t["rtcOk"] = rtc.ok;
+  t["lastNtp"] = lastNtp;                          // last internet time, 0 = never since start
+  t["battWarn"] = battWarn;                        // battery clock lost time while unplugged
+  if (rtc.ok) { uint32_t r = rtc.read(); t["rtcEpoch"] = r; t["rtcDiff"] = r ? (int32_t)(r - nowEpoch()) : 0; }
   d["mode"] = modeNow == MODE_PHOTO ? "photo" : modeNow == MODE_MANUAL ? "manual" : "auto";
   d["until"] = ovr.until; d["photo"] = ovr.photo; d["mins"] = ovr.mins;
   d["ramping"] = rampActive; d["identify"] = identifyJack;
@@ -795,12 +866,14 @@ static void apiState() {
     o["status"] = statusId(outRd[c].status, channelInUse(cfg, c)); o["ua"] = outRd[c].microAmps;
   }
   JsonObject s = d["sys"].to<JsonObject>();
+  s["online"] = onlineSinceMs ? (int32_t)((millis() - onlineSinceMs) / 1000) : (int32_t)-1;   // connected to home Wi-Fi this long, -1 = offline
   s["uptime"] = (millis() - bootMs) / 1000; s["heap"] = ESP.getFreeHeap(); s["boots"] = boots;
   s["reset"] = resetId(resetReason);
   s["outageStart"] = lastOutageStart; s["outageEnd"] = lastOutageEnd;
   int16_t tq = rtc.tempQuarterC(); if (tq != INT16_MIN) s["tempC"] = tq / 4.0f;
   s["dacOk"] = outputsOk(); s["adcOk"] = adc.ok; s["outMode"] = pwmMode ? "pwm" : "dac";
   s["wifi"] = WiFi.status() == WL_CONNECTED ? "connected" : staSsid.length() ? "searching" : "not_set";
+  s["mdns"] = mdnsName;
   s["ssid"] = staSsid; s["rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
   s["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   s["ap"] = apOn; s["apName"] = apName();
@@ -842,12 +915,12 @@ static void apiControl() {
       bool wasBad = timeSrc == TS_NONE || timeSrc == TS_ESTIMATED;
       uint32_t diff = e > nowEpoch() ? e - nowEpoch() : nowEpoch() - e;
       if (wasBad || diff > 5) {
-        setSystemTime(e); rtc.write(e); timeSrc = TS_PHONE; lastTimeSync = e; logEvent(EV_TIME, TS_PHONE);
+        setSystemTime(e); if (rtc.write(e) && !prefs.getBool("rtcSet", false)) prefs.putBool("rtcSet", true); timeSrc = TS_PHONE; lastTimeSync = e; logEvent(EV_TIME, TS_PHONE);
       }
     }
   }
   if (d["monZero"].is<bool>() && d["monZero"].as<bool>()) {
-    if (!adc.ok) { sendError(400, "No cable-check chip found (ADS1115 at 0x48)"); return; }
+    if (!adc.ok) { sendError(400, "No cable-check chip found (ADS7828 at 0x48)"); return; }
     if (pwmMode) { sendError(400, "The cable check needs the controller board, not PWM modules"); return; }
     monZeroStart();
   }
@@ -962,7 +1035,7 @@ static void apiConnectStatus() {
   d["failed"] = !conn && provStartMs && el >= PROV_FAIL_S;
   d["elapsed"] = el;
   d["ip"] = conn ? WiFi.localIP().toString() : "";
-  d["mdns"] = MDNS_NAME;
+  d["mdns"] = mdnsName;
   d["ssid"] = staSsid;
   sendJson(d);
 }
@@ -974,10 +1047,14 @@ static void apiFactoryReset() {
   ESP.restart();
 }
 
-// Provisioning: http://quanta.local/api/cloud-setup?id=quantacontroller1&email=...&pass=...&key=...
+// Provisioning: http://<device-id>.local/api/cloud-setup?id=quantacontroller1&email=...&pass=...&key=...
 // (any subset). Saved on the controller; the password is never sent back. Lock this down before shipping.
 static void apiCloudSetup() {
-  if (server.hasArg("id")) prefs.putString("cId", server.arg("id"));
+  bool hostnameChanged = false;
+  if (server.hasArg("id")) {
+    prefs.putString("cId", server.arg("id"));
+    hostnameChanged = controllerMdnsName() != mdnsName;
+  }
   if (server.hasArg("email")) prefs.putString("cEmail", server.arg("email"));
   if (server.hasArg("pass")) prefs.putString("cPass", server.arg("pass"));
   if (server.hasArg("key")) prefs.putString("cKey", server.arg("key"));
@@ -985,12 +1062,18 @@ static void apiCloudSetup() {
   JsonDocument r; r["ok"] = true; r["id"] = prefs.getString("cId", ""); r["email"] = prefs.getString("cEmail", "");
   r["hasPassword"] = prefs.getString("cPass", "").length() > 0; r["hasKey"] = prefs.getString("cKey", QUANTA_FB_API_KEY).length() > 0;
   sendJson(r);
+  if (hostnameChanged) { delay(250); ESP.restart(); }
 }
 
 static void webInit() {
   server.on("/", HTTP_GET, [] {
     Serial.printf("Page opened by %s\n", server.client().remoteIP().toString().c_str());
-    if (!staSsid.length() && !server.hasArg("app") && !provActive) {   // never set up: Wi-Fi setup comes first
+    // Wi-Fi setup comes first when the controller was never set up, or when a phone on the hotspot opens
+    // the page while home Wi-Fi isn't working (a saved network from somewhere else, a new router...).
+    bool viaHotspot = apOn && server.client().localIP() == WiFi.softAPIP();
+    bool needWifi = !staSsid.length() || (viaHotspot && WiFi.status() != WL_CONNECTED);
+    bool joining = provActive && millis() - provStartMs < PROV_FAIL_S * 1000UL;
+    if (needWifi && !server.hasArg("app") && !joining) {
       server.sendHeader("Cache-Control", "no-store");
       server.send_P(200, "text/html", WIFI_SETUP_HTML);
       return;
@@ -1136,6 +1219,26 @@ static void qemuTestSetup() {
 #endif
 
 // ======================================================================= setup / loop
+// Identity for the factory script (scripts/manufacture_quanta.py): printed at start and on "IDENTITY".
+static void printIdentity() {
+  uint8_t m[6] = {0}; esp_read_mac(m, ESP_MAC_WIFI_STA);
+  String id = prefs.isKey("cId") ? prefs.getString("cId", "") : String("");
+  Serial.printf("DEVICE ID: %s\n", id.length() ? id.c_str() : "(not provisioned)");
+  Serial.printf("FIRMWARE: %s\n", FW_VERSION);
+  Serial.printf("MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+static void serialCmdTick() {
+  static String sl;
+  while (Serial.available()) {
+    char ch = Serial.read();
+    if (ch == '\r') continue;
+    if (ch == '\n') { sl.trim(); if (sl == "IDENTITY") printIdentity(); sl = ""; }
+    else if (sl.length() < 40) sl += ch;
+  }
+}
+
+static bool cold0() { esp_reset_reason_t r = esp_reset_reason(); return r == ESP_RST_POWERON || r == ESP_RST_BROWNOUT; }
+
 void setup() {
   bootMs = millis();
   resetReason = esp_reset_reason();
@@ -1161,8 +1264,10 @@ void setup() {
   Serial.printf("DAC A: %s 0x%02X   DAC B: %s 0x%02X%s\n", dacA.ok ? "found at" : "missing", dacA.addr,
                 dacB.ok ? "found at" : "missing", dacB.addr, onBus2 ? " (bus 2, GPIO16/17)" : "");
   uint16_t cur[4], eep[4]; bool ir[4];
-  if (dacA.ok && dacA.read(cur, eep, ir)) for (int i = 0; i < 4; i++) codeOut[i] = cur[i];
-  if (dacB.ok && dacB.read(cur, eep, ir)) for (int i = 0; i < 4; i++) codeOut[4 + i] = cur[i];
+  uint16_t chipCode[8] = {0};
+  if (dacA.ok && dacA.read(cur, eep, ir)) for (int i = 0; i < 4; i++) chipCode[i] = cur[i];
+  if (dacB.ok && dacB.read(cur, eep, ir)) for (int i = 0; i < 4; i++) chipCode[4 + i] = cur[i];
+  for (uint8_t c = 0; c < 8; c++) codeOut[c] = chipCode[dacMap[c] & 7];
   pwmMode = !dacA.ok && !dacB.ok;                  // no controller board: bench prototype with PWM modules
   if (pwmMode) pwmInit();
 
@@ -1184,6 +1289,13 @@ void setup() {
   //    "still powered" note (flagged as estimated until the internet or a phone corrects it).
   uint32_t hb = prefs.getUInt("hb", 0);
   uint32_t r = rtc.read();
+  // Battery warning: the clock had been set before (so it isn't just a factory-fresh chip) and it
+  // stopped while unplugged. Cleared when a later power-up finds the clock still running.
+  bool rtcSet = prefs.getBool("rtcSet", false);
+  if (rtc.ok && rtc.lostPower && rtcSet) prefs.putBool("battWarn", true);
+  else if (r && cold0()) prefs.putBool("battWarn", false);
+  battWarn = prefs.getBool("battWarn", false);
+  if (r && !rtcSet) prefs.putBool("rtcSet", true);     // boards updated from older firmware: clock was set before
   if (r) { setSystemTime(r); timeSrc = TS_RTC; }
   else if (hb) { setSystemTime(hb); timeSrc = TS_ESTIMATED; logEvent(EV_CLOCK_LOST); }
   bool cold = resetReason == ESP_RST_POWERON || resetReason == ESP_RST_BROWNOUT;
@@ -1213,11 +1325,23 @@ void setup() {
   staPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
   otaUrl = prefs.isKey("otaUrl") ? prefs.getString("otaUrl", OTA_DEFAULT_URL) : String(OTA_DEFAULT_URL);
   otaAuto = prefs.isKey("otaAuto") ? prefs.getBool("otaAuto", true) : true;
+  mdnsName = controllerMdnsName();
+  {
+    String devId = otaDeviceId();
+    ota.setDeviceId(devId);
+    if (devId.length()) {                          // move a saved shared /quanta/ URL to this controller's own folder
+      String own = otaDeviceUrl(devId), cur = otaUrl; cur.toLowerCase();
+      if (cur.indexOf("/quanta/device/" + devId + "/") < 0) {
+        otaUrl = own; prefs.putString("otaUrl", otaUrl);
+        Serial.printf("OTA: update folder set to %s\n", otaUrl.c_str());
+      }
+    }
+  }
 #if defined(QUANTA_TEST_BUILD) && QUANTA_TEST_BUILD
   otaAuto = false;                                 // TEST BUILDS: never let the hosted release replace this firmware
 #endif
   WiFi.persistent(false);
-  WiFi.setHostname(MDNS_NAME);
+  WiFi.setHostname(mdnsName.c_str());
   WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t) { Serial.println("A phone joined the hotspot"); }, ARDUINO_EVENT_WIFI_AP_STACONNECTED);
   WiFi.onEvent([](WiFiEvent_t e, WiFiEventInfo_t) { Serial.println("A phone left the hotspot"); }, ARDUINO_EVENT_WIFI_AP_STADISCONNECTED);
   if (staSsid.length()) {
@@ -1225,13 +1349,16 @@ void setup() {
     WiFi.mode(WIFI_STA); WiFi.setAutoReconnect(true); WiFi.begin(staSsid.c_str(), staPass.c_str());
   } else startAp(0);
   webInit();
-  MDNS.begin(MDNS_NAME);
+  MDNS.begin(mdnsName.c_str());
   MDNS.addService("http", "tcp", 80);
   xTaskCreatePinnedToCore(cloudTask, "cloud", 12288, nullptr, 1, nullptr, 0);   // Quanta Cloud link (see above)
   sntp_set_time_sync_notification_cb(onNtp);
-  configTzTime(cfg.tz, "pool.ntp.org", "time.nist.gov");
+  sntp_set_sync_interval(NTP_INTERVAL_S * 1000UL);
+  configTzTime(cfg.tz, NTP_SERVER1, NTP_SERVER2, NTP_SERVER3);
   Serial.printf("Quanta Controller %s  reset=%s  time=%s  outputs=%s dac=%d/%d adc=%d rtc=%d\n", FW_VERSION,
                 resetId(resetReason), timeSrcId(), pwmMode ? "PWM (bench prototype)" : "DAC", dacA.ok, dacB.ok, adc.ok, rtc.ok);
+  if (battWarn) Serial.println("Battery clock lost time while unplugged: replace the CR2032 coin cell");
+  printIdentity();
 }
 
 void loop() {
@@ -1254,6 +1381,7 @@ void loop() {
     if (rtc.ok && timeSrc == TS_RTC && e - lastRtc >= RTC_RESYNC_S) {
       uint32_t r = rtc.read(); if (r) setSystemTime(r); lastRtc = e;
     }
+    ntpTick();
     wifiTick();
     otaConfirmTick();
     otaTick();
@@ -1263,6 +1391,7 @@ void loop() {
   cloudLoopTick();
   server.handleClient();
   buttonTick();
+  serialCmdTick();
   static uint32_t lastLed = 0;
   if (now - lastLed >= 50) { ledTick(); lastLed = now; }
   delay(1);

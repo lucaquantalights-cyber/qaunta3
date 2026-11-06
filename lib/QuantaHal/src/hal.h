@@ -70,8 +70,9 @@ struct Mcp4728 {
 };
 
 // ======================================================================= output monitor ADC
-// Production board: two ADS1115 (0x48 = CH0-3, 0x49 = CH4-7). Hand-built prototype: one ADS7828 (0x48).
-// Told apart by the ADS1115's Hi_thresh register, which reads 0x7FFF after power-up and is never written.
+// Quanta 4 Channel Driver board: one ADS7828 (0x48, 8 channels, 12 bit, 2.5 V internal reference).
+// With ADC_IS_ADS7828 = 0 it also recognises older builds with two ADS1115 (0x48 = CH0-3, 0x49 = CH4-7),
+// told apart by the ADS1115's Hi_thresh register, which reads 0x7FFF after power-up and is never written.
 struct MonitorAdc {
   enum Kind : uint8_t { NONE, ADS7828, ADS1115 };
   Kind kind = NONE;
@@ -89,6 +90,12 @@ struct MonitorAdc {
   bool begin() {
     kind = NONE; ok = false;
     Wire.beginTransmission(ADDR_ADC); if (Wire.endTransmission() != 0) return false;
+#if ADC_IS_ADS7828
+    kind = ADS7828; ok = true;
+    readRaw7828(0); delay(10);                // turns the internal reference on; let the 2.2 uF cap charge
+    readRaw7828(0);
+    return true;
+#endif
     uint16_t v = 0;
     if (rd16(ADDR_ADC, 0x03, v) && v == 0x7FFF) {
       Wire.beginTransmission(ADDR_ADC2); has2 = Wire.endTransmission() == 0;
@@ -97,14 +104,20 @@ struct MonitorAdc {
     return ok;
   }
   static uint8_t sel7828(uint8_t ch) { static const uint8_t m[8] = {0, 4, 1, 5, 2, 6, 3, 7}; return m[ch & 7]; }
-  // Returns millivolts at the op-amp output (after undoing the divider), or -1.
+  // One conversion of chip channel CHn (0-7). Returns 0-4095, or -1.
+  static int readRaw7828(uint8_t chipCh) {
+    Wire.beginTransmission(ADDR_ADC);
+    Wire.write(0x80 | (sel7828(chipCh) << 4) | 0x0C);     // single-ended, internal ref on, ADC on
+    if (Wire.endTransmission() != 0) return -1;
+    if (Wire.requestFrom((int)ADDR_ADC, 2) != 2) return -1;
+    return ((Wire.read() & 0x0F) << 8) | Wire.read();
+  }
+  // Returns millivolts at the op-amp output of output ch (OUT1 = 0, after undoing the divider), or -1.
   int readAmpMv(uint8_t ch) {
+    static const uint8_t monMap[8] = MON_MAP;
     if (kind == ADS7828) {
-      Wire.beginTransmission(ADDR_ADC);
-      Wire.write(0x80 | (sel7828(ch) << 4) | 0x0C);       // single-ended, internal ref on, ADC on
-      if (Wire.endTransmission() != 0) return -1;
-      if (Wire.requestFrom((int)ADDR_ADC, 2) != 2) return -1;
-      uint16_t raw = ((Wire.read() & 0x0F) << 8) | Wire.read();
+      int raw = readRaw7828(monMap[ch & 7]);
+      if (raw < 0) return -1;
       return (int)(raw * ADC_REF_V / 4096.0f * MON_DIVIDER * 1000.0f + 0.5f);
     }
     if (kind == ADS1115) {
@@ -125,13 +138,39 @@ struct MonitorAdc {
 };
 
 // ======================================================================= DS3231 RTC (kept in UTC)
+// The CR2032 on VBAT keeps the oscillator running while the controller is unplugged. If the cell is
+// dead (or missing) and the power goes off, the chip sets OSF ("oscillator stopped"), and read() then
+// returns 0 so the firmware never trusts a wrong time. The DS3231 can't measure the cell voltage itself,
+// so "lost time while unplugged" is the battery warning.
 struct Ds3231 {
   uint8_t addr = ADDR_RTC;
   bool ok = false;
+  bool lostPower = false;     // OSF was set: the clock stopped while unplugged -> replace the CR2032
+  static bool rd8(uint8_t a, uint8_t reg, uint8_t& v) {
+    Wire.beginTransmission(a); Wire.write(reg);
+    if (Wire.endTransmission(false) != 0 || Wire.requestFrom((int)a, 1) != 1) return false;
+    v = Wire.read(); return true;
+  }
+  static bool wr8(uint8_t a, uint8_t reg, uint8_t v) {
+    Wire.beginTransmission(a); Wire.write(reg); Wire.write(v); return Wire.endTransmission() == 0;
+  }
   static uint8_t bcd2(uint8_t v) { return (v >> 4) * 10 + (v & 0x0F); }
   static uint8_t tobcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
 
-  bool begin() { Wire.beginTransmission(addr); ok = Wire.endTransmission() == 0; return ok; }
+  bool begin() {
+    Wire.beginTransmission(addr); ok = Wire.endTransmission() == 0;
+    if (!ok) return false;
+    // Control: oscillator on battery (EOSC = 0), no square wave (INT/SQW not connected), alarms off.
+    uint8_t c;
+    if (rd8(addr, 0x0E, c) && c != 0x1C) wr8(addr, 0x0E, 0x1C);
+    // Status: remember OSF; turn the unused 32 kHz output off (saves coin-cell current).
+    uint8_t st;
+    if (rd8(addr, 0x0F, st)) {
+      lostPower = st & 0x80;
+      if (st & 0x08) wr8(addr, 0x0F, st & 0x80);       // keep OSF as is, clear EN32kHz and alarm flags
+    }
+    return true;
+  }
 
   // Days from civil date (Howard Hinnant's algorithm), no timegm() needed.
   static int32_t daysFromCivil(int y, unsigned m, unsigned d) {
@@ -148,7 +187,7 @@ struct Ds3231 {
     if (!ok) return 0;
     Wire.beginTransmission(addr); Wire.write(0x0F);
     if (Wire.endTransmission(false) != 0 || Wire.requestFrom((int)addr, 1) != 1) return 0;
-    if (Wire.read() & 0x80) return 0;                   // OSF: time is not trustworthy
+    if (Wire.read() & 0x80) { lostPower = true; return 0; }   // OSF: time is not trustworthy
     Wire.beginTransmission(addr); Wire.write(0x00);
     if (Wire.endTransmission(false) != 0 || Wire.requestFrom((int)addr, 7) != 7) return 0;
     uint8_t r[7]; for (int i = 0; i < 7; i++) r[i] = Wire.read();
@@ -168,7 +207,7 @@ struct Ds3231 {
     Wire.write(tobcd(u.tm_mon + 1)); Wire.write(tobcd((u.tm_year + 1900) % 100));
     if (Wire.endTransmission() != 0) return false;
     Wire.beginTransmission(addr); Wire.write(0x0F); Wire.write(0x00);   // clear OSF
-    return Wire.endTransmission() == 0;
+    return Wire.endTransmission() == 0;   // lostPower stays set until the next start, so the warning is seen
   }
 
   // Chip temperature, °C x 4 (it sits inside the controller box). INT16_MIN if unavailable.

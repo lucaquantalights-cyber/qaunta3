@@ -17,7 +17,7 @@ src/
   main.cpp                 the program: boot order, outputs, clock, settings, Wi-Fi, web API, updates
 lib/
   QuantaCore/src/core.h    schedule, presets, groups, modes, validation (no hardware code)
-  QuantaHal/src/hal.h      drivers: MCP4728 DAC, ADS7828 ADC, DS3231 clock
+  QuantaHal/src/hal.h      drivers: MCP4728 DAC, ADS7828 ADC, DS3231 battery clock
   QuantaHal/src/config.h   pins and timings (bench-prototype PWM pins are here)
   QuantaWebUI/src/web_ui.h the phone page, GENERATED on every build - don't edit
 ui/
@@ -29,6 +29,44 @@ host_tests/
   test_core.cpp            PC tests for QuantaCore
 ```
 Run the PC tests: `g++ -std=c++17 -Ilib/QuantaCore/src host_tests/test_core.cpp -o t && ./t`
+
+## P-0.0.14 (Nov 3): Expert changes merged with unique hostnames and per-device updates
+- Unique hostnames re-applied (apply_quanta_unique_hostname.py): quanta3 answers at http://quanta3.local.
+- Per-device OTA rebuilt: a provisioned controller checks https://quantalights.web.app/quanta/device/<id>/ only,
+  blocks a manifest whose "deviceId" isn't its own, and moves an old shared /quanta/ URL to its own folder at start.
+
+## P-0.0.7 (Nov 3): Expert mode changes for Luca (Expert_Mode_Analysis_11-3-26)
+- Expert groups now work like Guided aquariums: on the Lights page each output has a **Group** box. Type a name to group
+  outputs (same name = same group), leave it alone and the output is its own group. Group names can be renamed in "Your groups".
+- Now page: group pills at the top, same as Guided; picking a group shows only that group's lights and pictures (no more doubles).
+- Schedule page in Expert looks like Guided: tap a group card, its graph and settings open. Master dimmer and acclimation stay global.
+- Switching Guided -> Expert keeps the aquariums as groups with their schedules; Expert -> Guided turns groups back into aquariums.
+- Firmware: saves group/jack/photo aquarium links in Expert too.
+
+## P-0.0.6 (Oct 27): factory identity
+- Prints `DEVICE ID:`, `FIRMWARE:` and `MAC Address:` at start, and again when it receives `IDENTITY` on the serial port,
+  so scripts/manufacture_quanta.py can confirm the right unit got the right identity.
+
+## P-0.0.5 (Oct 27): matched to the board schematic "Quanta 4 Channel Driver_BK FIXED4" V1.0
+Board, as the firmware now expects it (lib/QuantaHal/src/config.h):
+- Bus 1, IO21 SDA / IO22 SCL: U9 MCP4728A4 DAC at 0x64 (OUT1-4), U5 ADS7828 monitor ADC at 0x48, U16 DS3231 clock at 0x68
+- Bus 2, IO16 SDA / IO17 SCL: U8 MCP4728A4 DAC at 0x64 (OUT5-8). Both DACs are the same address, so each has its own bus.
+- IO26 SK6812 status LED, IO27 button SW1, IO0 BOOT (also works as the button)
+- ADS7828 is used directly now (no ADS1115 detection on this board), with its 2.5 V internal reference.
+- `DAC_MAP` / `MON_MAP` in config.h: which chip channel drives / reads each output. Straight order by default;
+  check on the first board (Settings > Expert, one output on at a time, meter on the jack) and change only these lines if needed.
+
+Battery clock (DS3231 + CR2032):
+- Oscillator set to keep running on the coin cell; unused 32 kHz output turned off to save the cell.
+- If the clock stopped while unplugged (OSF flag), its time is never used, and the page shows "Replace the clock battery".
+  The warning clears at the next power-up where the clock kept time. A brand-new chip doesn't trigger it.
+Online time:
+- Internet time (pool.ntp.org, time.nist.gov, time.google.com) checked every hour while on Wi-Fi; it corrects the
+  battery clock when it is more than 2 s off. Clock writes now happen in the main loop, not in the time-server task,
+  so the I2C bus is never used by two tasks at once.
+- Status page (Settings > Status): "Internet time: last synced …", "Battery clock: OK / Replace CR2032 / Not set yet",
+  "Online for …" (time connected to home Wi-Fi).
+- New status fields: time.lastNtp, time.battWarn, time.rtcEpoch, time.rtcDiff, sys.online (-1 = offline).
 
 ## P-0.0.4 (Oct 22): checked screen by screen against the Oct 22 mockup; an output edit never needs more than the controller's 8 schedules
 
@@ -82,13 +120,13 @@ hold 5 s = setup hotspot, 20 s = forget Wi-Fi.
 ## First run
 1. Power the controller. On a phone, join the open Wi-Fi **Quanta-XXXX** (no password).
 2. The Wi-Fi setup page opens by itself (or go to `192.168.4.1`). Pick your home network, enter the password, tap **Save and connect**.
-3. Stay on the page. When it says **Connected**, write down the address it shows: `http://192.168.x.x` or `http://quanta.local`.
+3. Stay on the page. When it says **Connected**, write down the address it shows: `http://192.168.x.x` or `http://<device-id>.local`.
 4. The hotspot turns off about 2 minutes later. Switch the phone back to home Wi-Fi and open that address.
 
 Tap **Skip** on the setup page to use the controller from its hotspot without home Wi-Fi.
 Change networks later from Settings > Wi-Fi > **Choose from nearby networks**. Hold BOOT 5 s to reopen the hotspot.
 
-Note: every controller answers to `quanta.local`. With several controllers on one network, use each one's IP address.
+Each provisioned controller uses its own Device ID as its local hostname. For example, `quanta3` answers at `http://quanta3.local` and `quanta4` answers at `http://quanta4.local`. Unprovisioned boards use a unique `quanta-XXXX.local` fallback name.
 
 ## Fleet updates (OTA)
 Every controller installs the same firmware from one `quanta/` folder on your server

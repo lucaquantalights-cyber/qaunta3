@@ -1,0 +1,9 @@
+Quanta Controller
+
+Device ID: quanta0
+Serial Label: QNT-00000
+Claim Code: S3YG-L5TB
+MAC Address: EC:C9:FF:ED:A0:90
+Chip ID: 90A0EDFFC9EC
+Setup Wi-Fi: Quanta-90A0
+Local page: http://quanta0.local

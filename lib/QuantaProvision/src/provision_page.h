@@ -1,6 +1,6 @@
 // provision_page.h - first-time Wi-Fi setup page served from the controller's hotspot.
 // Same flow as the reef doser's Provisioner: pick a network from a scan, save, then stay on the
-// page while the controller connects, and show the home IP and http://quanta.local to write down.
+// page while the controller connects, and show the home IP and the controller-specific .local address to write down.
 #pragma once
 #include <Arduino.h>
 

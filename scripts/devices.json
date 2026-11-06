@@ -1,0 +1,465 @@
+{
+    "quanta1": {
+        "customer": "Luca Two",
+        "label": "QNT-00001",
+        "deviceId": "quanta1",
+        "firmwareVersion": "P-0.0.6",
+        "chipId": "D49EEDFFC9EC",
+        "macAddress": "EC:C9:FF:ED:9E:D4",
+        "board": "quanta-4ch-v1",
+        "hotspot": "Quanta-D49E",
+        "manufactureStatus": "COMPLETE",
+        "practice": false,
+        "manufactureStartedAt": "2026-10-31T15:01:05",
+        "hardwareTest": "PASS",
+        "hardwareTestAt": "2026-10-31T15:01:15",
+        "hardwareResults": {
+            "pullups": {
+                "result": "PASS",
+                "note": "all four lines sit high on the 10k resistors"
+            },
+            "bus1": {
+                "result": "PASS",
+                "note": "ADC 0x48, DAC 0x60, clock 0x68"
+            },
+            "bus2": {
+                "result": "PASS",
+                "note": "DAC at 0x60"
+            },
+            "dacA": {
+                "result": "PASS",
+                "note": "0x60: write + read-back OK, powers up at 0 V"
+            },
+            "dacB": {
+                "result": "PASS",
+                "note": "0x60: write + read-back OK, powers up at 0 V"
+            },
+            "adc": {
+                "result": "PASS",
+                "note": "8 channels read; all near 0 V with outputs off (max 86 mV)"
+            },
+            "out1": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out2": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out3": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out4": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out5": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out6": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out7": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out8": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "supply": {
+                "result": "PASS",
+                "note": "outputs reach 10.3 V, so 15 V, 5 V and the op-amps work"
+            },
+            "rtc": {
+                "result": "CHECK",
+                "note": "ticking, 24.0 C, time not set yet (type t to set it from the internet)"
+            },
+            "battery": {
+                "result": "CHECK",
+                "note": "clock had never been set (new chip). Type t to set it, unplug ALL power 1 min, plug back in"
+            },
+            "led": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "sw1": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "boot": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "wifi": {
+                "result": "NOTRUN",
+                "note": "no Wi-Fi saved: type w to enter one"
+            },
+            "ntp": {
+                "result": "NOTRUN",
+                "note": "needs Wi-Fi"
+            }
+        },
+        "buttonTest": "PASS",
+        "manufactureCompletedAt": "2026-10-31T15:04:32",
+        "outputLoad": "light",
+        "lightTest": "PASS",
+        "lightResults": {
+            "out1": {
+                "result": "PASS",
+                "note": "sensing skipped on this board batch; passed on visual check"
+            },
+            "out2": {
+                "result": "PASS",
+                "note": "sensing skipped on this board batch; passed on visual check"
+            },
+            "out3": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.10 mA back at 5 V)"
+            },
+            "out4": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.12 mA back at 5 V)"
+            },
+            "out5": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.07 mA back at 5 V)"
+            },
+            "out6": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.07 mA back at 5 V)"
+            },
+            "out7": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.08 mA back at 5 V)"
+            },
+            "out8": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.08 mA back at 5 V)"
+            }
+        },
+        "ledTest": "PASS",
+        "batteryTest": "SKIPPED",
+        "burnInStatus": "PASS",
+        "burnInStartedAt": "2026-10-31T15:02:48",
+        "burnInCompletedAt": "2026-10-31T15:03:49",
+        "claimCode": "FC2H-SQQF",
+        "claimBatch": "Batch-00001",
+        "claimSequence": 2,
+        "firebaseEmail": "quanta1@device.aidoser.tech",
+        "firebasePassword": "ENSRu4qQegLwf5jmIQW$1d0M",
+        "firebaseUid": "4sekP9P9HtXT67TXp9cEyKQTvZE3"
+    },
+    "quanta0": {
+        "customer": "Luca Da Mann",
+        "label": "QNT-00000",
+        "deviceId": "quanta0",
+        "firmwareVersion": "P-0.0.6",
+        "chipId": "90A0EDFFC9EC",
+        "macAddress": "EC:C9:FF:ED:A0:90",
+        "board": "quanta-4ch-v1",
+        "hotspot": "Quanta-90A0",
+        "manufactureStatus": "COMPLETE",
+        "practice": false,
+        "manufactureStartedAt": "2026-10-31T14:53:21",
+        "hardwareTest": "PASS",
+        "hardwareTestAt": "2026-10-31T14:53:30",
+        "hardwareResults": {
+            "pullups": {
+                "result": "PASS",
+                "note": "all four lines sit high on the 10k resistors"
+            },
+            "bus1": {
+                "result": "PASS",
+                "note": "ADC 0x48, DAC 0x60, clock 0x68"
+            },
+            "bus2": {
+                "result": "PASS",
+                "note": "DAC at 0x60"
+            },
+            "dacA": {
+                "result": "PASS",
+                "note": "0x60: write + read-back OK, powers up at 0 V"
+            },
+            "dacB": {
+                "result": "PASS",
+                "note": "0x60: write + read-back OK, powers up at 0 V"
+            },
+            "adc": {
+                "result": "PASS",
+                "note": "8 channels read; all near 0 V with outputs off (max 82 mV)"
+            },
+            "out1": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out2": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out3": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out4": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out5": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out6": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out7": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out8": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "supply": {
+                "result": "PASS",
+                "note": "outputs reach 10.2 V, so 15 V, 5 V and the op-amps work"
+            },
+            "rtc": {
+                "result": "PASS",
+                "note": "ticking, 24.2 C, 2026-10-31 19:53:30 UTC"
+            },
+            "battery": {
+                "result": "PASS",
+                "note": "the clock kept time while the board was unplugged"
+            },
+            "led": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "sw1": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "boot": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "wifi": {
+                "result": "NOTRUN",
+                "note": "no Wi-Fi saved: type w to enter one"
+            },
+            "ntp": {
+                "result": "NOTRUN",
+                "note": "needs Wi-Fi"
+            }
+        },
+        "outputLoad": "light",
+        "lightTest": "PASS",
+        "lightResults": {
+            "out1": {
+                "result": "PASS",
+                "note": "sensing skipped on this board batch; passed on visual check"
+            },
+            "out2": {
+                "result": "PASS",
+                "note": "sensing skipped on this board batch; passed on visual check"
+            },
+            "out3": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.10 mA back at 5 V)"
+            },
+            "out4": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.09 mA back at 5 V)"
+            },
+            "out5": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.08 mA back at 5 V)"
+            },
+            "out6": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.08 mA back at 5 V)"
+            },
+            "out7": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.08 mA back at 5 V)"
+            },
+            "out8": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.09 mA back at 5 V)"
+            }
+        },
+        "ledTest": "PASS",
+        "buttonTest": "PASS",
+        "batteryTest": "SKIPPED",
+        "burnInStatus": "PASS",
+        "burnInStartedAt": "2026-10-31T14:55:01",
+        "burnInCompletedAt": "2026-10-31T14:56:02",
+        "claimCode": "S3YG-L5TB",
+        "claimBatch": "Batch-00001",
+        "claimSequence": 1,
+        "ledWalk": "SKIPPED",
+        "firebaseEmail": "quanta0@device.aidoser.tech",
+        "firebasePassword": "S$D9f_-&s8e9*6BI4GfRZ@C_",
+        "firebaseUid": "ABBg5NJdxmRzfoKXU8oChkJrdVx1",
+        "manufactureCompletedAt": "2026-10-31T14:57:38"
+    },
+    "quanta3": {
+        "customer": "Test Ties",
+        "label": "QNT-00003",
+        "deviceId": "quanta3",
+        "firmwareVersion": "P-0.0.6",
+        "chipId": "CC9EEDFFC9EC",
+        "macAddress": "EC:C9:FF:ED:9E:CC",
+        "board": "quanta-4ch-v1",
+        "hotspot": "Quanta-CC9E",
+        "manufactureStatus": "COMPLETE",
+        "practice": false,
+        "manufactureStartedAt": "2026-10-31T16:36:55",
+        "hardwareTest": "PASS",
+        "hardwareTestAt": "2026-10-31T16:37:11",
+        "hardwareResults": {
+            "pullups": {
+                "result": "PASS",
+                "note": "all four lines sit high on the 10k resistors"
+            },
+            "bus1": {
+                "result": "PASS",
+                "note": "ADC 0x48, DAC 0x60, clock 0x68"
+            },
+            "bus2": {
+                "result": "PASS",
+                "note": "DAC at 0x60"
+            },
+            "dacA": {
+                "result": "PASS",
+                "note": "0x60: write + read-back OK, powers up at 0 V"
+            },
+            "dacB": {
+                "result": "PASS",
+                "note": "0x60: write + read-back OK, powers up at 0 V"
+            },
+            "adc": {
+                "result": "PASS",
+                "note": "8 channels read; all near 0 V with outputs off (max 90 mV)"
+            },
+            "out1": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out2": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out3": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out4": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out5": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out6": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out7": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "out8": {
+                "result": "CHECK",
+                "note": "output works 0-10 V, but no load current: is the LED in and the plug pushed fully home?"
+            },
+            "supply": {
+                "result": "PASS",
+                "note": "outputs reach 10.3 V, so 15 V, 5 V and the op-amps work"
+            },
+            "rtc": {
+                "result": "CHECK",
+                "note": "ticking, 22.5 C, time not set yet (type t to set it from the internet)"
+            },
+            "battery": {
+                "result": "CHECK",
+                "note": "clock had never been set (new chip). Type t to set it, unplug ALL power 1 min, plug back in"
+            },
+            "led": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "sw1": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "boot": {
+                "result": "NOTRUN",
+                "note": ""
+            },
+            "wifi": {
+                "result": "NOTRUN",
+                "note": "no Wi-Fi saved: type w to enter one"
+            },
+            "ntp": {
+                "result": "NOTRUN",
+                "note": "needs Wi-Fi"
+            }
+        },
+        "outputLoad": "light",
+        "lightTest": "PASS",
+        "lightResults": {
+            "out1": {
+                "result": "PASS",
+                "note": "sensing skipped on this board batch; passed on visual check"
+            },
+            "out2": {
+                "result": "PASS",
+                "note": "sensing skipped on this board batch; passed on visual check"
+            },
+            "out3": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.10 mA back at 5 V)"
+            },
+            "out4": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.09 mA back at 5 V)"
+            },
+            "out5": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.07 mA back at 5 V)"
+            },
+            "out6": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.08 mA back at 5 V)"
+            },
+            "out7": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.07 mA back at 5 V)"
+            },
+            "out8": {
+                "result": "PASS",
+                "note": "0-10 V OK; light driver detected (pushes 0.09 mA back at 5 V)"
+            }
+        },
+        "ledTest": "PASS",
+        "buttonTest": "PASS",
+        "batteryTest": "SKIPPED",
+        "burnInStatus": "PASS",
+        "burnInStartedAt": "2026-10-31T16:39:03",
+        "burnInCompletedAt": "2026-10-31T16:40:04",
+        "claimCode": "WTT8-ZNT7",
+        "claimBatch": "Batch-00001",
+        "claimSequence": 3,
+        "firebaseEmail": "quanta3@device.aidoser.tech",
+        "firebasePassword": "jWLCd&1BsJzu4A&i#D1Ea2qM",
+        "firebaseUid": "SFPTNmaVrtXqHc3FV1jycURc9Zy1",
+        "manufactureCompletedAt": "2026-10-31T16:40:43"
+    }
+}
